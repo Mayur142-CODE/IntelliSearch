@@ -12,9 +12,9 @@ function imageUrl(src) {
 }
 
 const SCORE_ROWS = [
-  ["Final score", "score"],
+  ["Final score", "final_score"],
   ["Exact score", "exact_score"],
-  ["Prefix score", "prefix_score"],
+  ["Partial score", "partial_score"],
   ["Fuzzy score", "fuzzy_score"],
   ["Semantic score", "semantic_score"],
 ];
@@ -24,13 +24,16 @@ export function ProductCard({ product }) {
   const [broken, setBroken] = useState(false);
   const src = imageUrl(product.image);
 
+  const productName = product.product_name || product.name;
+  const displayScore = product.final_score ?? product.fuzzy_score ?? product.score;
+
   return (
     <article className="flex flex-col overflow-hidden rounded-xl border border-border bg-card shadow-sm">
       <div className="flex aspect-[4/3] items-center justify-center bg-muted">
         {src && !broken ? (
           <img
             src={src}
-            alt={product.name}
+            alt={productName}
             loading="lazy"
             onError={() => setBroken(true)}
             className="h-full w-full object-cover"
@@ -42,9 +45,9 @@ export function ProductCard({ product }) {
 
       <div className="flex flex-1 flex-col gap-2 p-4">
         <div className="flex items-start justify-between gap-2">
-          <h3 className="text-sm font-semibold leading-snug text-foreground">{product.name}</h3>
+          <h3 className="text-sm font-semibold leading-snug text-foreground">{productName}</h3>
           <span className="shrink-0 rounded-md bg-secondary px-2 py-0.5 text-xs font-medium text-secondary-foreground">
-            {fmtScore(product.score)}
+            {fmtScore(displayScore)}
           </span>
         </div>
 
@@ -64,17 +67,21 @@ export function ProductCard({ product }) {
             aria-expanded={expanded}
             className="flex w-full items-center justify-between text-xs font-medium text-primary"
           >
-            Search Score
+            Relevance Breakdown
             <ChevronDown className={`h-4 w-4 ${expanded ? "rotate-180" : ""}`} />
           </button>
           {expanded && (
             <dl className="mt-2 space-y-1">
-              {SCORE_ROWS.map(([label, key]) => (
-                <div key={key} className="flex justify-between text-xs">
-                  <dt className="text-muted-foreground">{label}</dt>
-                  <dd className="font-mono text-foreground">{fmtScore(product[key])}</dd>
-                </div>
-              ))}
+              {SCORE_ROWS.map(([label, key]) => {
+                const val = product[key];
+                if (val === undefined) return null;
+                return (
+                  <div key={key} className="flex justify-between text-xs">
+                    <dt className="text-muted-foreground">{label}</dt>
+                    <dd className="font-mono text-foreground">{fmtScore(val)}</dd>
+                  </div>
+                );
+              })}
             </dl>
           )}
         </div>

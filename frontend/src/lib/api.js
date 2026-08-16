@@ -8,8 +8,8 @@ async function request(path, { signal } = {}) {
   return res.json();
 }
 
-export function searchProducts(query, { signal } = {}) {
-  return request(`/api/products/search?q=${encodeURIComponent(query)}`, { signal });
+export function searchProducts(query, { signal, limit = 10 } = {}) {
+  return request(`/search?q=${encodeURIComponent(query)}&limit=${limit}`, { signal });
 }
 
 export function getProduct(id, { signal } = {}) {

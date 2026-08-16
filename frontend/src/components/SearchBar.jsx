@@ -38,7 +38,7 @@ export function SearchBar({
     if (e.key === "Enter") {
       e.preventDefault();
       const picked = activeIndex >= 0 ? suggestions[activeIndex] : null;
-      onSubmit(picked ? picked.name : value);
+      onSubmit(picked ? (picked.product_name || picked.name) : value);
       setOpen(false);
     }
   }
@@ -54,6 +54,7 @@ export function SearchBar({
           aria-expanded={open}
           aria-controls="search-suggestions"
           aria-autocomplete="list"
+          suppressHydrationWarning
           onChange={(e) => {
             onChange(e.target.value);
             setOpen(true);
@@ -91,15 +92,17 @@ export function SearchBar({
                 type="button"
                 onMouseEnter={() => setActiveIndex(i)}
                 onClick={() => {
-                  onSubmit(s.name);
+                  onSubmit(s.product_name || s.name);
                   setOpen(false);
                 }}
                 className={`flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left text-sm ${
                   i === activeIndex ? "bg-accent text-accent-foreground" : "text-foreground"
                 }`}
               >
-                <span className="truncate">{s.name}</span>
-                <span className="shrink-0 text-xs text-muted-foreground">{s.brand}</span>
+                <span className="truncate">{s.product_name || s.name}</span>
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  {s.brand}{s.category ? ` · ${s.category}` : ""}
+                </span>
               </button>
             </li>
           ))}
