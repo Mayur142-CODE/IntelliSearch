@@ -28,7 +28,10 @@ from sqlalchemy.orm import Session
 
 from app.models.product import Product
 from app.services.fuzzy_search import fuzzy_search_products
-from app.services.semantic_search import semantic_search_products
+from app.services.semantic_search import (
+    compute_query_similarities,
+    semantic_search_products,
+)
 
 # Scoring Signal Weights (Tunable Constants)
 EXACT_WEIGHT = 0.20
@@ -106,8 +109,11 @@ def _get_partial_candidates(db: Session, query: str, limit: int = 50) -> List[Pr
             Product.product_name.ilike(prefix_pattern),
             Product.product_name.ilike(substring_pattern),
             Product.brand.ilike(prefix_pattern),
+            Product.brand.ilike(substring_pattern),
             Product.category.ilike(prefix_pattern),
+            Product.category.ilike(substring_pattern),
             Product.tags.ilike(substring_pattern),
+            Product.description.ilike(substring_pattern),
         ])
 
     if not conditions:
@@ -237,7 +243,7 @@ def search_products(
     query: str,
     limit: int = 20,
     candidate_limit: int = 50,
-    min_final_score: float = 0.15,
+    min_final_score: float = 0.10,
 ) -> List[CombinedSearchResult]:
     """
     Perform hybrid product search with a 4-way candidate generation layer.
@@ -283,7 +289,6 @@ def search_products(
         candidate_map[p.id] = {
             "product": p,
             "fuzzy_score": 0.0,
-            "semantic_score": 0.0,
         }
 
     for p in partial_candidates:
@@ -291,7 +296,6 @@ def search_products(
             candidate_map[p.id] = {
                 "product": p,
                 "fuzzy_score": 0.0,
-                "semantic_score": 0.0,
             }
 
     for item in fuzzy_candidates:
@@ -302,22 +306,31 @@ def search_products(
             candidate_map[p_id] = {
                 "product": item.product,
                 "fuzzy_score": max(0.0, float(item.fuzzy_score)),
-                "semantic_score": 0.0,
             }
 
     for item in semantic_candidates:
         p_id = item.product.id
-        if p_id in candidate_map:
-            candidate_map[p_id]["semantic_score"] = max(0.0, float(item.semantic_score))
-        else:
+        if p_id not in candidate_map:
             candidate_map[p_id] = {
                 "product": item.product,
                 "fuzzy_score": 0.0,
-                "semantic_score": max(0.0, float(item.semantic_score)),
             }
 
     if not candidate_map:
         return []
+
+    # 5b. Compute per-candidate semantic scores from full similarity array.
+    # This ensures that EVERY candidate (including those found only by fuzzy or
+    # partial retrieval) gets its actual semantic similarity score, not just the
+    # semantic top-K. Cost: ~1.4ms dot product + ~1ms dict construction.
+    # The query embedding is LRU-cached, so this reuses the same ONNX output.
+    try:
+        sim_scores, sim_product_ids = compute_query_similarities(cleaned_query)
+        id_to_semantic = dict(
+            zip(sim_product_ids.tolist(), sim_scores.tolist())
+        )
+    except Exception:
+        id_to_semantic = {}
 
     # 6. Calculate multi-signal scores for each candidate
     ranked_results: List[CombinedSearchResult] = []
@@ -325,7 +338,7 @@ def search_products(
     for p_id, data in candidate_map.items():
         product: Product = data["product"]
         f_score: float = min(max(data["fuzzy_score"], 0.0), 1.0)
-        s_score: float = min(max(data["semantic_score"], 0.0), 1.0)
+        s_score: float = min(max(id_to_semantic.get(p_id, 0.0), 0.0), 1.0)
 
         e_score: float = _calculate_exact_score(cleaned_query, product)
         p_score: float = _calculate_partial_score(cleaned_query, product)
@@ -338,7 +351,14 @@ def search_products(
             (s_score * SEMANTIC_WEIGHT)
         )
 
-        if final_score < min_final_score:
+        # Adaptive threshold: if only semantic signal contributes (all other scores = 0),
+        # use a higher threshold to filter noise for gibberish queries.
+        # If any non-semantic signal contributes, use the base min_final_score (0.10)
+        # to allow fuzzy-matched typo candidates through.
+        has_non_semantic_signal = (e_score > 0) or (p_score > 0) or (f_score > 0)
+        effective_threshold = min_final_score if has_non_semantic_signal else 0.15
+
+        if final_score < effective_threshold:
             continue
 
         ranked_results.append(

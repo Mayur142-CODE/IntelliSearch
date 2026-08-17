@@ -19,16 +19,25 @@ from app.services.search_ranking import search_products
 
 def run_test():
     test_suite = [
-        ("EXACT & PREFIX / PARTIAL QUERIES", [
+        ("EXACT QUERIES", [
             "nike",
             "samsung",
             "laptop",
+            "footwear",
+        ]),
+        ("PREFIX / PARTIAL QUERIES", [
+            "foot",
+            "footwe",
+            "lapt",
             "head",
-            "run",
             "wire",
-            "phone",
+            "phon",
+            "sams",
+            "run",
         ]),
         ("TYPO / FUZZY QUERIES", [
+            "lptop",
+            "botle",
             "nik shose",
             "samsng phone",
             "wireles hedphone",
@@ -37,11 +46,28 @@ def run_test():
             "something to carry my laptop",
             "device for listening to music",
             "shoes for morning running",
+            "something to charge my phone",
+            "bag for traveling",
+        ]),
+        ("BRAND QUERIES", [
+            "anker",
+        ]),
+        ("CATEGORY QUERIES", [
+            "electronics",
+            "fashion",
+            "audio",
+        ]),
+        ("MULTI-WORD QUERIES", [
+            "wireless headphones",
+            "gaming laptop",
+            "running shoes",
+            "phone case",
         ]),
         ("NO RESULT QUERY", [
             "nonexistentproduct12345xyz",
         ]),
     ]
+
 
     session = SessionLocal()
 

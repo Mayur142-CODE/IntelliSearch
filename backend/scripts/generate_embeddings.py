@@ -11,6 +11,7 @@ This script:
 5. Ensures exact 1:1 index alignment between product IDs and vector embedding rows.
 """
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -142,6 +143,22 @@ def generate_embeddings():
         np.save(PRODUCT_IDS_FILE, product_ids_array)
 
         elapsed_time = time.time() - start_time
+
+        # Save timing and count metadata to JSON for benchmark auditing
+        info_file = EMBEDDINGS_DIR / "generation_info.json"
+        try:
+            with open(info_file, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "total_products": processed_count,
+                        "elapsed_time_seconds": round(elapsed_time, 2),
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    },
+                    f,
+                    indent=2,
+                )
+        except Exception:
+            pass
 
         print("\n" + "=" * 80)
         print("EMBEDDING GENERATION COMPLETE")
