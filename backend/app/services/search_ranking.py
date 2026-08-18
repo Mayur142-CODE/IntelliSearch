@@ -351,12 +351,13 @@ def search_products(
             (s_score * SEMANTIC_WEIGHT)
         )
 
-        # Adaptive threshold: if only semantic signal contributes (all other scores = 0),
-        # use a higher threshold to filter noise for gibberish queries.
-        # If any non-semantic signal contributes, use the base min_final_score (0.10)
-        # to allow fuzzy-matched typo candidates through.
-        has_non_semantic_signal = (e_score > 0) or (p_score > 0) or (f_score > 0)
-        effective_threshold = min_final_score if has_non_semantic_signal else 0.15
+        # Generic False-Positive Protection:
+        # Require strong lexical signal (exact > 0, partial > 0, or fuzzy >= 0.30)
+        # to qualify for the relaxed min_final_score (0.10) threshold.
+        # Candidates supported solely by weak fuzzy noise or pure low semantic similarity
+        # require the higher 0.15 threshold to eliminate false positive candidates.
+        has_strong_lexical_signal = (e_score > 0) or (p_score > 0) or (f_score >= 0.30)
+        effective_threshold = min_final_score if has_strong_lexical_signal else 0.15
 
         if final_score < effective_threshold:
             continue

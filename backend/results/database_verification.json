@@ -1,0 +1,65 @@
+{
+  "timestamp": "2026-08-18T13:25:05.186864+00:00",
+  "checks": [
+    {
+      "check": "Database Connection",
+      "status": "PASS",
+      "detail": "PostgreSQL connection successful"
+    },
+    {
+      "check": "Product Count",
+      "status": "PASS",
+      "detail": "7500 products in database"
+    },
+    {
+      "check": "Products Table Exists",
+      "status": "PASS",
+      "detail": "Tables found: ['alembic_version', 'products']"
+    },
+    {
+      "check": "Product Indexes",
+      "status": "PASS",
+      "detail": "7 indexes: ['gin_products_brand_trgm', 'gin_products_category_trgm', 'gin_products_product_name_trgm', 'gin_products_tags_trgm', 'ix_products_brand', 'ix_products_category', 'ix_products_product_name']"
+    },
+    {
+      "check": "Column Schema",
+      "status": "PASS",
+      "detail": "Columns: ['id', 'product_name', 'description', 'brand', 'category', 'tags', 'price', 'image']"
+    },
+    {
+      "check": "Embedding Alignment",
+      "status": "PASS",
+      "detail": "Embeddings: 7500, Product IDs: 7500, DB: 7500 (aligned)"
+    },
+    {
+      "check": "pg_trgm Extension",
+      "status": "PASS",
+      "detail": "pg_trgm extension is installed"
+    }
+  ],
+  "product_count": 7500,
+  "tables": [
+    "alembic_version",
+    "products"
+  ],
+  "indexes": [
+    "gin_products_brand_trgm",
+    "gin_products_category_trgm",
+    "gin_products_product_name_trgm",
+    "gin_products_tags_trgm",
+    "ix_products_brand",
+    "ix_products_category",
+    "ix_products_product_name"
+  ],
+  "columns": [
+    "id",
+    "product_name",
+    "description",
+    "brand",
+    "category",
+    "tags",
+    "price",
+    "image"
+  ],
+  "overall": "PASS"
+}

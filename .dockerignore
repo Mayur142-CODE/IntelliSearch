@@ -1,0 +1,39 @@
+# ==============================================================================
+# Docker Ignore Configuration
+# ==============================================================================
+
+# Version control
+.git
+.gitignore
+
+# Local environment files (injected via Docker Compose)
+.env
+.env.local
+.env.*.local
+
+# Python cache & temporary build artifacts
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.pytest_cache
+**/.coverage
+**/htmlcov
+**/.mypy_cache
+**/.ruff_cache
+
+# Frontend node_modules & temporary build caches
+frontend/node_modules
+frontend/.output
+frontend/.wrangler
+
+# System & IDE files
+.DS_Store
+Thumbs.db
+.idea
+.vscode
+
+# Benchmark reports & temporary logs
+*.log
+backend/search_test_results.json
+backend/benchmark_results.json

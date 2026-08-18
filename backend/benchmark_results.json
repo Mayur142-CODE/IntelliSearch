@@ -11,16 +11,16 @@
     "model_dir_mb": 173.77
   },
   "memory": {
-    "baseline_mb": 121.3,
-    "post_loading_mb": 239.93,
-    "peak_mb": 243.21,
-    "net_increase_mb": 118.63,
+    "baseline_mb": 134.75,
+    "post_loading_mb": 264.93,
+    "peak_mb": 271.15,
+    "net_increase_mb": 130.18,
     "metric": "Process Resident Set Size (RSS)"
   },
   "cold_start": {
-    "model_embedding_load_ms": 303.22,
-    "first_onnx_inference_ms": 25.19,
-    "total_cold_start_ms": 328.4,
+    "model_embedding_load_ms": 285.33,
+    "first_onnx_inference_ms": 21.87,
+    "total_cold_start_ms": 307.2,
     "note": "One-time per process, not per search request"
   },
   "warm_search_performance": {
@@ -28,311 +28,311 @@
       {
         "query": "nike",
         "type": "Exact",
-        "avg_ms": 64.59,
-        "min_ms": 59.76,
-        "max_ms": 67.86,
-        "median_ms": 66.14,
+        "avg_ms": 140.13,
+        "min_ms": 132.44,
+        "max_ms": 146.54,
+        "median_ms": 141.42,
         "raw_runs_ms": [
-          66.14,
-          59.76,
-          67.86
+          146.54,
+          132.44,
+          141.42
         ]
       },
       {
         "query": "samsung",
         "type": "Exact",
-        "avg_ms": 36.5,
-        "min_ms": 30.87,
-        "max_ms": 39.48,
-        "median_ms": 39.15,
+        "avg_ms": 65.36,
+        "min_ms": 60.54,
+        "max_ms": 74.98,
+        "median_ms": 60.56,
         "raw_runs_ms": [
-          39.48,
-          39.15,
-          30.87
+          60.56,
+          74.98,
+          60.54
         ]
       },
       {
         "query": "laptop",
         "type": "Partial",
-        "avg_ms": 64.94,
-        "min_ms": 62.41,
-        "max_ms": 67.71,
-        "median_ms": 64.71,
+        "avg_ms": 129.54,
+        "min_ms": 106.61,
+        "max_ms": 143.07,
+        "median_ms": 138.94,
         "raw_runs_ms": [
-          62.41,
-          64.71,
-          67.71
+          143.07,
+          106.61,
+          138.94
         ]
       },
       {
         "query": "head",
         "type": "Partial",
-        "avg_ms": 78.51,
-        "min_ms": 73.19,
-        "max_ms": 85.06,
-        "median_ms": 77.29,
+        "avg_ms": 130.51,
+        "min_ms": 118.51,
+        "max_ms": 150.76,
+        "median_ms": 122.25,
         "raw_runs_ms": [
-          77.29,
-          73.19,
-          85.06
+          150.76,
+          118.51,
+          122.25
         ]
       },
       {
         "query": "lapt",
         "type": "Partial",
-        "avg_ms": 55.82,
-        "min_ms": 50.54,
-        "max_ms": 64.63,
-        "median_ms": 52.3,
+        "avg_ms": 84.84,
+        "min_ms": 84.25,
+        "max_ms": 85.36,
+        "median_ms": 84.9,
         "raw_runs_ms": [
-          64.63,
-          52.3,
-          50.54
+          85.36,
+          84.9,
+          84.25
         ]
       },
       {
         "query": "wire",
         "type": "Partial",
-        "avg_ms": 74.26,
-        "min_ms": 67.32,
-        "max_ms": 87.9,
-        "median_ms": 67.55,
+        "avg_ms": 116.03,
+        "min_ms": 104.65,
+        "max_ms": 121.98,
+        "median_ms": 121.47,
         "raw_runs_ms": [
-          87.9,
-          67.55,
-          67.32
+          121.98,
+          121.47,
+          104.65
         ]
       },
       {
         "query": "foot",
         "type": "Partial",
-        "avg_ms": 111.87,
-        "min_ms": 102.09,
-        "max_ms": 118.95,
-        "median_ms": 114.56,
+        "avg_ms": 172.93,
+        "min_ms": 163.49,
+        "max_ms": 187.81,
+        "median_ms": 167.5,
         "raw_runs_ms": [
-          114.56,
-          102.09,
-          118.95
+          163.49,
+          167.5,
+          187.81
         ]
       },
       {
         "query": "lptop",
         "type": "Fuzzy",
-        "avg_ms": 107.18,
-        "min_ms": 97.25,
-        "max_ms": 122.67,
-        "median_ms": 101.61,
+        "avg_ms": 156.53,
+        "min_ms": 155.53,
+        "max_ms": 158.03,
+        "median_ms": 156.02,
         "raw_runs_ms": [
-          122.67,
-          101.61,
-          97.25
+          156.02,
+          158.03,
+          155.53
         ]
       },
       {
         "query": "botle",
         "type": "Fuzzy",
-        "avg_ms": 136.47,
-        "min_ms": 123.31,
-        "max_ms": 161.14,
-        "median_ms": 124.98,
+        "avg_ms": 194.3,
+        "min_ms": 188.76,
+        "max_ms": 199.1,
+        "median_ms": 195.05,
         "raw_runs_ms": [
-          161.14,
-          124.98,
-          123.31
+          199.1,
+          195.05,
+          188.76
         ]
       },
       {
         "query": "footwe",
         "type": "Fuzzy",
-        "avg_ms": 187.16,
-        "min_ms": 172.18,
-        "max_ms": 201.22,
-        "median_ms": 188.08,
+        "avg_ms": 270.13,
+        "min_ms": 243.21,
+        "max_ms": 294.47,
+        "median_ms": 272.71,
         "raw_runs_ms": [
-          188.08,
-          201.22,
-          172.18
+          243.21,
+          294.47,
+          272.71
         ]
       },
       {
         "query": "nik shose",
         "type": "Fuzzy",
-        "avg_ms": 125.01,
-        "min_ms": 118.96,
-        "max_ms": 134.69,
-        "median_ms": 121.39,
+        "avg_ms": 212.33,
+        "min_ms": 205.78,
+        "max_ms": 225.16,
+        "median_ms": 206.04,
         "raw_runs_ms": [
-          134.69,
-          121.39,
-          118.96
+          225.16,
+          205.78,
+          206.04
         ]
       },
       {
         "query": "samsng phone",
         "type": "Fuzzy",
-        "avg_ms": 91.92,
-        "min_ms": 89.45,
-        "max_ms": 96.83,
-        "median_ms": 89.49,
+        "avg_ms": 147.41,
+        "min_ms": 143.51,
+        "max_ms": 152.51,
+        "median_ms": 146.21,
         "raw_runs_ms": [
-          96.83,
-          89.49,
-          89.45
+          152.51,
+          143.51,
+          146.21
         ]
       },
       {
         "query": "wireles hedphone",
         "type": "Fuzzy",
-        "avg_ms": 140.82,
-        "min_ms": 137.61,
-        "max_ms": 145.12,
-        "median_ms": 139.74,
+        "avg_ms": 232.54,
+        "min_ms": 187.31,
+        "max_ms": 297.22,
+        "median_ms": 213.08,
         "raw_runs_ms": [
-          145.12,
-          139.74,
-          137.61
+          297.22,
+          187.31,
+          213.08
         ]
       },
       {
         "query": "something to carry my laptop",
         "type": "Semantic",
-        "avg_ms": 330.05,
-        "min_ms": 301.72,
-        "max_ms": 350.77,
-        "median_ms": 337.67,
+        "avg_ms": 322.17,
+        "min_ms": 306.11,
+        "max_ms": 342.4,
+        "median_ms": 318.02,
         "raw_runs_ms": [
-          350.77,
-          301.72,
-          337.67
+          306.11,
+          342.4,
+          318.02
         ]
       },
       {
         "query": "device for listening to music",
         "type": "Semantic",
-        "avg_ms": 367.89,
-        "min_ms": 360.2,
-        "max_ms": 382.09,
-        "median_ms": 361.39,
+        "avg_ms": 428.7,
+        "min_ms": 393.48,
+        "max_ms": 464.66,
+        "median_ms": 427.96,
         "raw_runs_ms": [
-          360.2,
-          382.09,
-          361.39
+          427.96,
+          464.66,
+          393.48
         ]
       },
       {
         "query": "shoes for morning running",
         "type": "Semantic",
-        "avg_ms": 331.71,
-        "min_ms": 315.69,
-        "max_ms": 363.29,
-        "median_ms": 316.16,
+        "avg_ms": 334.78,
+        "min_ms": 318.4,
+        "max_ms": 358.63,
+        "median_ms": 327.3,
         "raw_runs_ms": [
-          363.29,
-          315.69,
-          316.16
+          358.63,
+          327.3,
+          318.4
         ]
       },
       {
         "query": "something to charge my phone",
         "type": "Semantic",
-        "avg_ms": 302.73,
-        "min_ms": 291.7,
-        "max_ms": 314.81,
-        "median_ms": 301.67,
+        "avg_ms": 292.41,
+        "min_ms": 282.66,
+        "max_ms": 302.05,
+        "median_ms": 292.51,
         "raw_runs_ms": [
-          314.81,
-          291.7,
-          301.67
+          292.51,
+          282.66,
+          302.05
         ]
       },
       {
         "query": "bag for traveling",
         "type": "Semantic",
-        "avg_ms": 110.83,
-        "min_ms": 100.68,
-        "max_ms": 128.33,
-        "median_ms": 103.47,
+        "avg_ms": 143.53,
+        "min_ms": 133.58,
+        "max_ms": 153.91,
+        "median_ms": 143.09,
         "raw_runs_ms": [
-          103.47,
-          100.68,
-          128.33
+          143.09,
+          133.58,
+          153.91
         ]
       },
       {
         "query": "nonexistentproduct12345xyz",
         "type": "No Result",
-        "avg_ms": 218.33,
-        "min_ms": 208.06,
-        "max_ms": 226.03,
-        "median_ms": 220.89,
+        "avg_ms": 254.59,
+        "min_ms": 246.1,
+        "max_ms": 262.97,
+        "median_ms": 254.69,
         "raw_runs_ms": [
-          220.89,
-          226.03,
-          208.06
+          262.97,
+          254.69,
+          246.1
         ]
       }
     ],
-    "overall_avg_ms": 154.56,
-    "overall_median_ms": 118.96,
-    "overall_min_ms": 30.87,
-    "overall_max_ms": 382.09,
+    "overall_avg_ms": 201.51,
+    "overall_median_ms": 167.5,
+    "overall_min_ms": 60.54,
+    "overall_max_ms": 464.66,
     "per_type_summary": {
       "Exact": {
-        "avg_ms": 50.54,
-        "min_ms": 30.87,
-        "max_ms": 67.86,
-        "median_ms": 49.62
+        "avg_ms": 102.75,
+        "min_ms": 60.54,
+        "max_ms": 146.54,
+        "median_ms": 103.71
       },
       "Partial": {
-        "avg_ms": 77.08,
-        "min_ms": 50.54,
-        "max_ms": 118.95,
-        "median_ms": 67.71
+        "avg_ms": 126.77,
+        "min_ms": 84.25,
+        "max_ms": 187.81,
+        "median_ms": 121.98
       },
       "Fuzzy": {
-        "avg_ms": 131.43,
-        "min_ms": 89.45,
-        "max_ms": 201.22,
-        "median_ms": 124.14
+        "avg_ms": 202.21,
+        "min_ms": 143.51,
+        "max_ms": 297.22,
+        "median_ms": 197.07
       },
       "Semantic": {
-        "avg_ms": 288.64,
-        "min_ms": 100.68,
-        "max_ms": 382.09,
-        "median_ms": 315.69
+        "avg_ms": 304.32,
+        "min_ms": 133.58,
+        "max_ms": 464.66,
+        "median_ms": 318.02
       },
       "No Result": {
-        "avg_ms": 218.33,
-        "min_ms": 208.06,
-        "max_ms": 226.03,
-        "median_ms": 220.89
+        "avg_ms": 254.59,
+        "min_ms": 246.1,
+        "max_ms": 262.97,
+        "median_ms": 254.69
       }
     }
   },
   "api_performance": {
     "mode": "Live HTTP API Server (http://localhost:8000)",
-    "avg_api_response_ms": 306.05,
+    "avg_api_response_ms": 332.83,
     "all_latencies_ms": [
-      2244.23,
-      60.33,
-      96.18,
-      121.04,
-      90.0,
-      102.23,
-      165.53,
-      140.78,
-      169.79,
-      220.85,
-      189.6,
-      140.42,
-      187.73,
-      375.8,
-      411.06,
-      364.21,
-      318.51,
-      161.49,
-      255.14
+      661.32,
+      835.39,
+      190.87,
+      238.61,
+      196.36,
+      165.86,
+      271.58,
+      167.66,
+      403.19,
+      281.21,
+      234.02,
+      222.02,
+      315.94,
+      497.17,
+      451.49,
+      386.31,
+      328.81,
+      166.59,
+      309.3
     ]
   },
   "embedding_generation": {
@@ -341,33 +341,33 @@
   },
   "target_check": {
     "target_ms": 1000.0,
-    "measured_avg_ms": 154.56,
+    "measured_avg_ms": 201.51,
     "status": "PASS",
     "passed": true,
     "per_type_targets": {
       "Exact": {
         "target": 200.0,
-        "measured_avg_ms": 50.54,
+        "measured_avg_ms": 102.75,
         "passed": true
       },
       "Partial": {
         "target": 200.0,
-        "measured_avg_ms": 77.08,
+        "measured_avg_ms": 126.77,
         "passed": true
       },
       "Fuzzy": {
         "target": 500.0,
-        "measured_avg_ms": 131.43,
+        "measured_avg_ms": 202.21,
         "passed": true
       },
       "Semantic": {
         "target": 800.0,
-        "measured_avg_ms": 288.64,
+        "measured_avg_ms": 304.32,
         "passed": true
       },
       "No Result": {
         "target": 500.0,
-        "measured_avg_ms": 218.33,
+        "measured_avg_ms": 254.59,
         "passed": true
       }
     }

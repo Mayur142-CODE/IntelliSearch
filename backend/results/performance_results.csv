@@ -1,0 +1,20 @@
+query,type,avg_ms,min_ms,max_ms,median_ms
+nike,Exact,140.13,132.44,146.54,141.42
+samsung,Exact,65.36,60.54,74.98,60.56
+laptop,Partial,129.54,106.61,143.07,138.94
+head,Partial,130.51,118.51,150.76,122.25
+lapt,Partial,84.84,84.25,85.36,84.9
+wire,Partial,116.03,104.65,121.98,121.47
+foot,Partial,172.93,163.49,187.81,167.5
+lptop,Fuzzy,156.53,155.53,158.03,156.02
+botle,Fuzzy,194.3,188.76,199.1,195.05
+footwe,Fuzzy,270.13,243.21,294.47,272.71
+nik shose,Fuzzy,212.33,205.78,225.16,206.04
+samsng phone,Fuzzy,147.41,143.51,152.51,146.21
+wireles hedphone,Fuzzy,232.54,187.31,297.22,213.08
+something to carry my laptop,Semantic,322.17,306.11,342.4,318.02
+device for listening to music,Semantic,428.7,393.48,464.66,427.96
+shoes for morning running,Semantic,334.78,318.4,358.63,327.3
+something to charge my phone,Semantic,292.41,282.66,302.05,292.51
+bag for traveling,Semantic,143.53,133.58,153.91,143.09
+nonexistentproduct12345xyz,No Result,254.59,246.1,262.97,254.69

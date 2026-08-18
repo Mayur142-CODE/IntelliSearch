@@ -73,19 +73,19 @@ def _safe(token: str) -> str:
 
 def _token_score_sql(token: str, alias: str = "p") -> str:
     """
-    Build field-weighted trigram similarity SQL for one token.
+    Build field-weighted trigram similarity SQL for one token using strict_word_similarity.
     Weights: product_name=50%, brand=20%, category=15%, tags=15%.
-    Takes greatest(word_similarity, similarity) for name/brand/category.
+    Takes greatest(strict_word_similarity, similarity) for name/brand/category.
     """
     t = _safe(token)
     return (
-        f"(GREATEST(word_similarity('{t}', {alias}.product_name),"
+        f"(GREATEST(strict_word_similarity('{t}', {alias}.product_name),"
         f" similarity('{t}', {alias}.product_name)) * 0.50"
-        f" + GREATEST(word_similarity('{t}', {alias}.brand),"
+        f" + GREATEST(strict_word_similarity('{t}', {alias}.brand),"
         f" similarity('{t}', {alias}.brand)) * 0.20"
-        f" + GREATEST(word_similarity('{t}', {alias}.category),"
+        f" + GREATEST(strict_word_similarity('{t}', {alias}.category),"
         f" similarity('{t}', {alias}.category)) * 0.15"
-        f" + word_similarity('{t}', {alias}.tags) * 0.15)"
+        f" + strict_word_similarity('{t}', {alias}.tags) * 0.15)"
     )
 
 
@@ -99,7 +99,7 @@ def _fuzzy_score_sql(tokens: List[str], query: str, alias: str = "p") -> str:
     n = len(tokens)
     safe_q = _safe(query)
     full_sim = (
-        f"GREATEST(word_similarity('{safe_q}', {alias}.product_name),"
+        f"GREATEST(strict_word_similarity('{safe_q}', {alias}.product_name),"
         f" similarity('{safe_q}', {alias}.product_name))"
     )
 
@@ -136,7 +136,7 @@ def _build_gin_conditions(tokens: List[str]) -> List[str]:
 
 def _build_ws_conditions(tokens: List[str], threshold: float = 0.35) -> List[str]:
     """
-    Build word_similarity conditions for fallback path.
+    Build strict_word_similarity conditions for fallback path.
     Searches product_name, brand, and category.
     No index required — bounded by LIMIT in the CTE.
     """
@@ -144,9 +144,9 @@ def _build_ws_conditions(tokens: List[str], threshold: float = 0.35) -> List[str
     for t in tokens:
         if len(t) >= 3:
             st = _safe(t)
-            conditions.append(f"word_similarity('{st}', product_name) >= {threshold}")
-            conditions.append(f"word_similarity('{st}', brand) >= {threshold}")
-            conditions.append(f"word_similarity('{st}', category) >= {threshold}")
+            conditions.append(f"strict_word_similarity('{st}', product_name) >= {threshold}")
+            conditions.append(f"strict_word_similarity('{st}', brand) >= {threshold}")
+            conditions.append(f"strict_word_similarity('{st}', category) >= {threshold}")
     return conditions
 
 

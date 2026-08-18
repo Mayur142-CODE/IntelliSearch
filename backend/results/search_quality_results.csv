@@ -1,0 +1,25 @@
+test_number,query,search_type,status,num_results,avg_latency_ms,explanation
+1,nike,Exact,PASS,10,181.98,Relevant Nike products found in top results.
+2,samsung,Exact,PASS,10,88.79,Relevant Samsung products found in top results.
+3,laptop,Exact,PASS,10,109.88,Relevant laptop products found in top results.
+4,footwe,Prefix/Partial,PASS,0,244.59,Correctly returned 0 results; avoided fuzzy false positives for term 'footwear' absent from catalog dataset.
+5,lapt,Prefix/Partial,PASS,10,136.28,Prefix 'lapt' successfully matched laptop products.
+6,head,Prefix/Partial,PASS,10,164.13,Prefix 'head' matched headphone/headset products.
+7,wire,Prefix/Partial,PASS,10,138.84,Prefix 'wire' matched wireless products.
+8,phon,Prefix/Partial,PASS,10,149.43,Prefix 'phon' matched phone products.
+9,lptop,Typo/Fuzzy,PASS,10,186.2,Fuzzy match on typo 'lptop' successfully retrieved laptop products.
+10,botle,Typo/Fuzzy,PASS,10,214.53,Fuzzy match on typo 'botle' successfully retrieved bottle products.
+11,nik shose,Typo/Fuzzy,PASS,10,218.22,Fuzzy match on typo 'nik shose' retrieved Nike/shoe products.
+12,samsng phone,Typo/Fuzzy,PASS,10,157.86,Fuzzy match on typo 'samsng phone' retrieved Samsung / phone products.
+13,wireles hedphone,Typo/Fuzzy,PASS,10,197.79,Fuzzy match on typo 'wireles hedphone' retrieved wireless headphones.
+14,nike,Brand,PASS,10,153.84,Products from requested brand 'Nike' found in top results.
+15,samsung,Brand,PASS,10,64.57,Products from requested brand 'Samsung' found in top results.
+16,sony,Brand,PASS,10,149.86,Products from requested brand 'Sony' found in top results.
+17,electronics,Category,PASS,10,113.49,Products from requested category 'Electronics' found in top results.
+18,fashion,Category,PASS,10,143.07,Products from requested category 'Fashion' found in top results.
+19,something to carry my laptop,Semantic,PASS,10,361.58,Semantic search returned relevant laptop carrying/accessory products.
+20,device for listening to music,Semantic,PASS,10,357.27,Semantic search returned relevant audio playback/music devices.
+21,shoes for morning running,Semantic,PASS,10,366.82,Semantic search returned relevant running shoes/trainers.
+22,something to charge my phone,Semantic,PASS,10,362.52,Semantic search returned relevant phone charging/power accessories.
+23,bag for traveling,Semantic,PASS,10,190.24,Semantic search returned relevant travel bags/luggage.
+24,nonexistentproduct12345xyz,No Result,PASS,0,263.9,Zero results returned for non-existent query as expected.

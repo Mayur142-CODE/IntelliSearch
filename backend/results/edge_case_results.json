@@ -1,0 +1,338 @@
+{
+  "timestamp": "2026-08-18T13:26:11.759883+00:00",
+  "total_tests": 22,
+  "passed": 22,
+  "failed": 0,
+  "pass_rate": "100.0%",
+  "tests": [
+    {
+      "test_id": 1,
+      "description": "Empty query string (q='')",
+      "input": {
+        "url": "/search",
+        "params": {
+          "q": "",
+          "limit": 10
+        }
+      },
+      "expected_status": 200,
+      "expected_behavior": "HTTP 200 with 0 results",
+      "actual_behavior": "HTTP 200, 0 results",
+      "status": "PASS"
+    },
+    {
+      "test_id": 2,
+      "description": "Missing query parameter (no q)",
+      "input": {
+        "url": "/search",
+        "params": {
+          "limit": 10
+        }
+      },
+      "expected_status": 200,
+      "expected_behavior": "HTTP 200 with 0 results (default q='')",
+      "actual_behavior": "HTTP 200, 0 results",
+      "status": "PASS"
+    },
+    {
+      "test_id": 3,
+      "description": "Whitespace-only query",
+      "input": {
+        "url": "/search",
+        "params": {
+          "q": "   ",
+          "limit": 10
+        }
+      },
+      "expected_status": 200,
+      "expected_behavior": "HTTP 200 with 0 results",
+      "actual_behavior": "HTTP 200, 0 results",
+      "status": "PASS"
+    },
+    {
+      "test_id": 4,
+      "description": "Very long query (500 chars)",
+      "input": {
+        "url": "/search",
+        "params": {
+          "q": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "limit": 10
+        }
+      },
+      "expected_status": 200,
+      "expected_behavior": "HTTP 200, no crash, 0 or few results",
+      "actual_behavior": "HTTP 200, 0 results",
+      "status": "PASS"
+    },
+    {
+      "test_id": 5,
+      "description": "Very long multi-word query (1400 chars)",
+      "input": {
+        "url": "/search",
+        "params": {
+          "q": "search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search search ",
+          "limit": 10
+        }
+      },
+      "expected_status": 200,
+      "expected_behavior": "HTTP 200, no crash",
+      "actual_behavior": "HTTP 200, 0 results",
+      "status": "PASS"
+    },
+    {
+      "test_id": 6,
+      "description": "Special characters: !!!",
+      "input": {
+        "url": "/search",
+        "params": {
+          "q": "!!!",
+          "limit": 10
+        }
+      },
+      "expected_status": 200,
+      "expected_behavior": "HTTP 200, handled gracefully",
+      "actual_behavior": "HTTP 200, 0 results",
+      "status": "PASS"
+    },
+    {
+      "test_id": 7,
+      "description": "Special characters: @@@",
+      "input": {
+        "url": "/search",
+        "params": {
+          "q": "@@@",
+          "limit": 10
+        }
+      },
+      "expected_status": 200,
+      "expected_behavior": "HTTP 200, handled gracefully",
+      "actual_behavior": "HTTP 200, 0 results",
+      "status": "PASS"
+    },
+    {
+      "test_id": 8,
+      "description": "Special characters: ###",
+      "input": {
+        "url": "/search",
+        "params": {
+          "q": "###",
+          "limit": 10
+        }
+      },
+      "expected_status": 200,
+      "expected_behavior": "HTTP 200, handled gracefully",
+      "actual_behavior": "HTTP 200, 0 results",
+      "status": "PASS"
+    },
+    {
+      "test_id": 9,
+      "description": "Mixed special: iphone!!!",
+      "input": {
+        "url": "/search",
+        "params": {
+          "q": "iphone!!!",
+          "limit": 10
+        }
+      },
+      "expected_status": 200,
+      "expected_behavior": "HTTP 200, may return results",
+      "actual_behavior": "HTTP 200, 10 results",
+      "status": "PASS"
+    },
+    {
+      "test_id": 10,
+      "description": "Unicode: café",
+      "input": {
+        "url": "/search",
+        "params": {
+          "q": "café",
+          "limit": 10
+        }
+      },
+      "expected_status": 200,
+      "expected_behavior": "HTTP 200, handled gracefully",
+      "actual_behavior": "HTTP 200, 3 results",
+      "status": "PASS"
+    },
+    {
+      "test_id": 11,
+      "description": "Unicode: Hindi (फोन)",
+      "input": {
+        "url": "/search",
+        "params": {
+          "q": "फोन",
+          "limit": 10
+        }
+      },
+      "expected_status": 200,
+      "expected_behavior": "HTTP 200, handled gracefully",
+      "actual_behavior": "HTTP 200, 0 results",
+      "status": "PASS"
+    },
+    {
+      "test_id": 12,
+      "description": "Unicode: Gujarati (ગુજરાતી)",
+      "input": {
+        "url": "/search",
+        "params": {
+          "q": "ગુજરાતી",
+          "limit": 10
+        }
+      },
+      "expected_status": 200,
+      "expected_behavior": "HTTP 200, handled gracefully",
+      "actual_behavior": "HTTP 200, 0 results",
+      "status": "PASS"
+    },
+    {
+      "test_id": 13,
+      "description": "Random gibberish: abcxyz123",
+      "input": {
+        "url": "/search",
+        "params": {
+          "q": "abcxyz123",
+          "limit": 10
+        }
+      },
+      "expected_status": 200,
+      "expected_behavior": "HTTP 200, 0 or few results",
+      "actual_behavior": "HTTP 200, 0 results",
+      "status": "PASS"
+    },
+    {
+      "test_id": 14,
+      "description": "Nonsense: xyznonexistent123",
+      "input": {
+        "url": "/search",
+        "params": {
+          "q": "xyznonexistent123",
+          "limit": 10
+        }
+      },
+      "expected_status": 200,
+      "expected_behavior": "HTTP 200, 0 results expected",
+      "actual_behavior": "HTTP 200, 0 results",
+      "status": "PASS"
+    },
+    {
+      "test_id": 15,
+      "description": "Very large limit (limit=100)",
+      "input": {
+        "url": "/search",
+        "params": {
+          "q": "nike",
+          "limit": 100
+        }
+      },
+      "expected_status": 200,
+      "expected_behavior": "HTTP 200, returns up to 100 results",
+      "actual_behavior": "HTTP 200, 67 results",
+      "status": "PASS"
+    },
+    {
+      "test_id": 16,
+      "description": "Invalid limit: limit=0",
+      "input": {
+        "url": "/search",
+        "params": {
+          "q": "nike",
+          "limit": 0
+        }
+      },
+      "expected_status": 422,
+      "expected_behavior": "HTTP 422 validation error (limit ge=1)",
+      "actual_behavior": "HTTP 422 (validation error as expected)",
+      "status": "PASS"
+    },
+    {
+      "test_id": 17,
+      "description": "Invalid limit: limit=-1",
+      "input": {
+        "url": "/search",
+        "params": {
+          "q": "nike",
+          "limit": -1
+        }
+      },
+      "expected_status": 422,
+      "expected_behavior": "HTTP 422 validation error (limit ge=1)",
+      "actual_behavior": "HTTP 422 (validation error as expected)",
+      "status": "PASS"
+    },
+    {
+      "test_id": 18,
+      "description": "Invalid limit: limit=abc",
+      "input": {
+        "url": "/search",
+        "params": {
+          "q": "nike",
+          "limit": "abc"
+        }
+      },
+      "expected_status": 422,
+      "expected_behavior": "HTTP 422 validation error (not integer)",
+      "actual_behavior": "HTTP 422 (validation error as expected)",
+      "status": "PASS"
+    },
+    {
+      "test_id": 19,
+      "description": "Exceeding max limit: limit=999",
+      "input": {
+        "url": "/search",
+        "params": {
+          "q": "nike",
+          "limit": 999
+        }
+      },
+      "expected_status": 422,
+      "expected_behavior": "HTTP 422 validation error (limit le=100)",
+      "actual_behavior": "HTTP 422 (validation error as expected)",
+      "status": "PASS"
+    },
+    {
+      "test_id": 20,
+      "description": "SQL injection: ' OR '1'='1",
+      "input": {
+        "url": "/search",
+        "params": {
+          "q": "' OR '1'='1",
+          "limit": 10
+        }
+      },
+      "expected_status": 200,
+      "expected_behavior": "HTTP 200, treated as text, no SQL execution",
+      "actual_behavior": "HTTP 200, 1 results",
+      "status": "PASS"
+    },
+    {
+      "test_id": 21,
+      "description": "SQL injection: '; DROP TABLE products; --",
+      "input": {
+        "url": "/search",
+        "params": {
+          "q": "'; DROP TABLE products; --",
+          "limit": 10
+        }
+      },
+      "expected_status": 200,
+      "expected_behavior": "HTTP 200, treated as text, no SQL execution",
+      "actual_behavior": "HTTP 200, 10 results",
+      "status": "PASS"
+    },
+    {
+      "test_id": 22,
+      "description": "SQL injection: 1 UNION SELECT * FROM products",
+      "input": {
+        "url": "/search",
+        "params": {
+          "q": "1 UNION SELECT * FROM products",
+          "limit": 10
+        }
+      },
+      "expected_status": 200,
+      "expected_behavior": "HTTP 200, treated as text, no SQL execution",
+      "actual_behavior": "HTTP 200, 10 results",
+      "status": "PASS"
+    }
+  ]
+}
