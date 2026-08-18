@@ -378,41 +378,39 @@ In accordance with technical evaluation guidelines, the following AI-assisted to
 
 ---
 
-## Future Improvements
-
-- Integrate `pgvector` with HNSW indexing for scaling to $100,000+$ catalog items.
-- Add multi-attribute facet filtering (price range sliders, brand/category checkboxes).
-- Implement personalized click-through re-ranking.
-
----
-
 ## Demo Video
 
-*For the complete video demonstration guide and timeline, see [`docs/DEMO.md`](docs/DEMO.md).*
+A 3–5 minute demonstration video will show:
 
-> **Demo video:** To be added before final submission.
+- Offline operation
+- Exact and partial search
+- Typo-tolerant search
+- Semantic search
+- Autocomplete
+- Search-ranking scores
+
+Demo video: To be added before final submission.
 
 ---
 
 ## NorthStar Assignment Compliance
 
-| Requirement | Status | Verification Detail |
-|---|:---:|---|
-| **React Frontend** | ✅ | React 18 + Vite SPA served on port 3000 |
-| **FastAPI + Python Backend** | ✅ | Python 3.12 FastAPI server on port 8000 |
-| **PostgreSQL Database** | ✅ | PostgreSQL 16 Alpine on port 5432 |
-| **Lightweight Local Embedding Model** | ✅ | `all-MiniLM-L6-v2` ONNX (173.77 MB, 384-dim) |
-| **Docker Compose** | ✅ | 3 containerized services with health checks |
-| **Minimum 5,000 Products** | ✅ | **7,500 products** verified in database |
-| **Fuzzy Search** | ✅ | PostgreSQL `pg_trgm` multi-path candidate retrieval |
-| **Semantic Search** | ✅ | Local FastEmbed ONNX dense vector cosine similarity |
-| **Combined Ranking** | ✅ | 4-signal weighted formula with false-positive filtering |
-| **Local CPU-Based Inference** | ✅ | ONNX Runtime + NumPy BLAS matrix multiplication |
-| **No Cloud AI API at Runtime** | ✅ | Strict `HF_HUB_OFFLINE=1` airgapped execution |
-| **Offline Operation** | ✅ | 100% verified with disconnected network |
-| **Product Import Script** | ✅ | `backend/scripts/import_products.py` |
-| **Embedding Generation Script** | ✅ | `backend/scripts/generate_embeddings.py` |
-| **PostgreSQL Migration / Schema** | ✅ | Alembic migrations creating tables & 4 GIN indexes |
-| **`backend/.env.example`** | ✅ | Present in backend directory |
-| **$\ge 15$ Documented Test Cases** | ✅ | **24 test cases** documented (100% pass rate) |
-| **Performance Measurements** | ✅ | Measured warm avg **201.51 ms**, P95 **393.48 ms** |
+| Requirement | Status |
+|---|:---:|
+| React + Vite Frontend | ✅ |
+| FastAPI + Python Backend | ✅ |
+| PostgreSQL | ✅ |
+| Local CPU Embedding Model | ✅ |
+| Docker Compose | ✅ |
+| 5,000+ Products | ✅ 7,500 |
+| Fuzzy Search | ✅ |
+| Semantic Search | ✅ |
+| Combined Ranking | ✅ |
+| Offline Operation | ✅ Verified |
+| Product Import Script | ✅ |
+| Embedding Generation | ✅ |
+| PostgreSQL Migration / Schema | ✅ |
+| 15+ Search Test Cases | ✅ 24/24 |
+| Performance Measurement | ✅ |
+| Edge-Case Testing | ✅ 22/22 |
+
