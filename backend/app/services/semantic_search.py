@@ -1,34 +1,25 @@
 """
-Semantic Search Service Module
+Semantic Search Service Module — ChromaDB Persistent Vector Engine
 
-Architecture & Optimization Design Rationale:
----------------------------------------------
-1. Why embeddings are precomputed offline:
-   - Generating 384-dimensional dense vector embeddings for thousands of products on every search
-     request causes severe CPU spikes and latency. Pre-computing into .npy files enables near-zero
-     disk I/O during search.
+Architecture & Optimization Design:
+------------------------------------
+1. Persistent ChromaDB Vector Store:
+   - Connects to ChromaDB PersistentClient at backend/data/chroma.
+   - Vector collection 'products' contains pre-computed 384-dim embeddings.
+   - Supports metadata filtering (e.g. price range pushed directly into HNSW index).
 
-2. Why the FastEmbed model is loaded locally:
-   - The local cached ONNX model (all-MiniLM-L6-v2) enables fully offline execution with no
-     network dependencies, API rate limits, or external latency.
+2. Distance to Similarity Metric Conversion:
+   - ChromaDB computes squared Euclidean distance (L2^2) for normalized unit vectors:
+     ||u - v||^2 = ||u||^2 + ||v||^2 - 2(u · v) = 2 - 2*cos(θ)
+   - Cosine Similarity = 1.0 - (distance / 2.0), bounded in [0.0, 1.0].
 
-3. Why Cosine Similarity reduces to Dot Product:
-   - FastEmbed outputs L2-normalized unit vectors (||v||_2 = 1).
-   - cos(θ) = (u · v) / (||u|| × ||v||) = u · v when both are unit vectors.
-   - This is computed as a single BLAS matrix-vector product: embeddings_matrix @ query_vec.
-   - Profiled at ~1.4ms for 7,500 × 384 float32 vectors.
+3. Local FastEmbed ONNX Model:
+   - sentence-transformers/all-MiniLM-L6-v2 runs locally with zero external network calls.
+   - LRU query embedding cache (128 entries) eliminates redundant ONNX inference.
 
-4. Why only top product IDs are fetched from PostgreSQL:
-   - NumPy computes similarity across all products in ~1.4ms in-memory.
-   - We extract only the top-K product IDs and query PostgreSQL with WHERE id IN (...),
-     minimizing DB round trips.
-
-5. LRU query embedding cache:
-   - Repeated identical queries (e.g. from benchmark, debounce bursts) skip ONNX inference.
-   - Bounded at 128 entries to limit memory growth.
-
-6. Embedding matrix loading with np.ascontiguousarray:
-   - Ensures the float32 matrix is C-contiguous for optimal BLAS dot product performance.
+4. Multi-Variant Query Embedding for Typo Generalization:
+   - When typo-normalized query variants are generated, queries all vector candidates
+     and merges best cosine similarity scores per product into the semantic candidate pool.
 """
 
 from dataclasses import dataclass
@@ -36,8 +27,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
+import chromadb
 from fastembed import TextEmbedding
+import numpy as np
 from sqlalchemy.orm import Session
 
 from app.models.product import Product
@@ -50,19 +42,16 @@ BACKEND_DIR = APP_DIR.parent
 # Semantic Search Constants
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 EMBEDDING_DIMENSION = 384
+COLLECTION_NAME = "products"
 
 # Storage Paths
-EMBEDDINGS_DIR = BACKEND_DIR / "data" / "embeddings"
+CHROMA_DIR = BACKEND_DIR / "data" / "chroma"
 MODEL_DIR = BACKEND_DIR / "models" / "all-MiniLM-L6-v2"
 
-# Binary File Paths
-EMBEDDINGS_FILE = EMBEDDINGS_DIR / "product_embeddings.npy"
-PRODUCT_IDS_FILE = EMBEDDINGS_DIR / "product_ids.npy"
-
 # Module-Level Lazy Loaded Singleton Cache
+_chroma_client: Optional[chromadb.PersistentClient] = None
+_collection: Optional[Any] = None
 _model: Optional[TextEmbedding] = None
-_embeddings_matrix: Optional[np.ndarray] = None
-_product_ids: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -85,69 +74,48 @@ class SemanticSearchResult:
         }
 
 
-def get_semantic_search_resources() -> Tuple[TextEmbedding, np.ndarray, np.ndarray]:
+def get_semantic_search_resources() -> Tuple[TextEmbedding, Any]:
     """
-    Module-level lazy-loaded singleton for FastEmbed model and NumPy embedding matrices.
-    Loads files and model once per process into memory to ensure repeated searches do not hit disk.
+    Module-level lazy-loaded singleton for FastEmbed model and ChromaDB collection.
+    Initializes ChromaDB PersistentClient and loads ONNX embedding weights once per process.
     """
-    global _model, _embeddings_matrix, _product_ids
+    global _chroma_client, _collection, _model
 
-    if _model is not None and _embeddings_matrix is not None and _product_ids is not None:
-        return _model, _embeddings_matrix, _product_ids
+    if _model is not None and _collection is not None:
+        return _model, _collection
 
-    # 1. Error handling for missing binary files
-    if not EMBEDDINGS_FILE.exists():
+    # 1. Initialize Persistent ChromaDB Client
+    if not CHROMA_DIR.exists():
         raise FileNotFoundError(
-            f"Product embeddings file missing at {EMBEDDINGS_FILE}. "
+            f"ChromaDB directory missing at {CHROMA_DIR}. "
             "Please run 'python scripts/generate_embeddings.py' first."
         )
 
-    if not PRODUCT_IDS_FILE.exists():
-        raise FileNotFoundError(
-            f"Product IDs file missing at {PRODUCT_IDS_FILE}. "
-            "Please run 'python scripts/generate_embeddings.py' first."
+    _chroma_client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+
+    try:
+        _collection = _chroma_client.get_collection(COLLECTION_NAME)
+    except Exception as e:
+        raise RuntimeError(
+            f"Collection '{COLLECTION_NAME}' not found in ChromaDB at {CHROMA_DIR}: {e}"
         )
 
-    # 2. Load pre-computed NumPy binary files into memory.
-    # Use float32 and ensure C-contiguous layout for optimal BLAS dot product.
-    _embeddings_matrix = np.ascontiguousarray(
-        np.load(EMBEDDINGS_FILE), dtype=np.float32
-    )
-    _product_ids = np.load(PRODUCT_IDS_FILE)
-
-    # 3. Validate array shapes and non-emptiness
-    if _embeddings_matrix.size == 0 or _product_ids.size == 0:
-        raise ValueError("Loaded embedding matrix or product IDs array is empty.")
-
-    if _embeddings_matrix.ndim != 2 or _embeddings_matrix.shape[1] != EMBEDDING_DIMENSION:
-        raise ValueError(
-            f"Expected embedding matrix shape (N, {EMBEDDING_DIMENSION}), "
-            f"got {_embeddings_matrix.shape}."
-        )
-
-    if len(_embeddings_matrix) != len(_product_ids):
-        raise ValueError(
-            f"Mismatch between embeddings count ({len(_embeddings_matrix)}) "
-            f"and product IDs count ({len(_product_ids)})."
-        )
-
-    # 4. Load local FastEmbed model using cached ONNX weights in MODEL_DIR
+    # 2. Load local FastEmbed model using cached ONNX weights in MODEL_DIR
     _model = TextEmbedding(
         model_name=MODEL_NAME,
         cache_dir=str(MODEL_DIR),
     )
 
-    return _model, _embeddings_matrix, _product_ids
+    return _model, _collection
 
 
 @lru_cache(maxsize=128)
 def _get_query_embedding(query: str) -> np.ndarray:
     """
     LRU-cached query embedding to avoid redundant ONNX inference for repeated queries.
-    Bounded at 128 entries. Only used for warm cache — cold path goes through get_semantic_search_resources().
-    Returns a unit-normalized float32 query vector.
+    Bounded at 128 entries. Returns a unit-normalized float32 query vector.
     """
-    model, _, _ = get_semantic_search_resources()
+    model, _ = get_semantic_search_resources()
     query_vectors = list(model.embed([query]))
     if not query_vectors:
         raise ValueError(f"FastEmbed returned no vectors for query: {query!r}")
@@ -158,89 +126,132 @@ def _get_query_embedding(query: str) -> np.ndarray:
     return query_vec
 
 
-def compute_query_similarities(query: str) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Compute cosine similarity between query and ALL product embeddings.
+def _build_chroma_where(
+    min_price: Optional[float] = None,
+    max_price: Optional[float] = None,
+    brand: Optional[str] = None,
+    category: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Build ChromaDB where metadata filter."""
+    clauses = []
 
-    Returns (similarity_scores, product_ids) where:
-    - similarity_scores[i] = cosine similarity between query and product_ids[i]
-    - product_ids[i] = database ID of the i-th product
+    if min_price is not None:
+        clauses.append({"price": {"$gte": float(min_price)}})
+    if max_price is not None:
+        clauses.append({"price": {"$lte": float(max_price)}})
+    if brand is not None:
+        clauses.append({"brand": {"$eq": str(brand)}})
+    if category is not None:
+        clauses.append({"category": {"$eq": str(category)}})
 
-    Used by the ranking engine to compute per-candidate semantic scores
-    for ALL candidates in the union (not just the semantic top-K).
-    This ensures that a product found by fuzzy search but not in the
-    semantic top-50 still gets its actual semantic score for ranking.
-
-    Performance: ~1.4ms for 7,500 x 384 float32 dot product.
-    Query embedding is LRU-cached, so repeated calls for the same query
-    skip ONNX inference entirely.
-    """
-    _, embeddings_matrix, product_ids = get_semantic_search_resources()
-    query_vec = _get_query_embedding(query.strip())
-    similarity_scores = np.dot(embeddings_matrix, query_vec)
-    return similarity_scores, product_ids
-
+    if not clauses:
+        return None
+    if len(clauses) == 1:
+        return clauses[0]
+    return {"$and": clauses}
 
 
 def semantic_search_products(
     db: Session,
     query: str,
-    limit: int = 20,
+    limit: int = 50,
+    min_price: Optional[float] = None,
+    max_price: Optional[float] = None,
+    brand_filter: Optional[str] = None,
+    category_filter: Optional[str] = None,
     min_similarity: float = 0.0,
+    normalized_query: Optional[str] = None,
+    normalized_queries: Optional[List[str]] = None,
 ) -> List[SemanticSearchResult]:
     """
-    Perform local semantic similarity search across product catalog.
+    Perform local semantic similarity search across product catalog using ChromaDB.
 
     1. Embeds user query string into a 384-dimensional vector using local FastEmbed model.
-    2. Computes matrix dot product (cosine similarity) against all stored product embeddings in NumPy.
-    3. Ranks top-K product IDs by similarity score completely in-memory.
-    4. Queries PostgreSQL ONLY for the top matching product IDs.
-    5. Returns ranked list of SemanticSearchResult objects preserving exact score ordering.
+    2. If normalized query variants are provided, searches all variants and merges best scores.
+    3. Queries ChromaDB persistent HNSW index with push-down metadata price/brand filters.
+    4. Converts returned L2 distances into true cosine similarity scores.
+    5. Queries PostgreSQL ONLY for the top matching product IDs.
+    6. Returns ranked list of SemanticSearchResult objects preserving exact score ordering.
     """
     cleaned_query = query.strip()
     if not cleaned_query:
         return []
 
-    # Get cached model and numpy embedding matrices (loaded once per process)
-    model, embeddings_matrix, product_ids = get_semantic_search_resources()
+    # Get cached model and Chroma collection
+    model, collection = get_semantic_search_resources()
 
-    # Embed query text — LRU cache avoids redundant ONNX inference for repeated queries
+    # Collect query vectors to search
+    query_vectors_to_search: List[List[float]] = []
     try:
         query_vec = _get_query_embedding(cleaned_query)
+        query_vectors_to_search.append(query_vec.tolist())
     except Exception:
+        pass
+
+    all_normalized = list(normalized_queries) if normalized_queries else []
+    if normalized_query and normalized_query not in all_normalized:
+        all_normalized.append(normalized_query)
+
+    for nq in all_normalized:
+        if nq and nq.strip() and nq.strip().lower() != cleaned_query.lower():
+            try:
+                norm_vec = _get_query_embedding(nq.strip())
+                query_vectors_to_search.append(norm_vec.tolist())
+            except Exception:
+                pass
+
+    if not query_vectors_to_search:
         return []
 
-    # Fast BLAS matrix-vector dot product for cosine similarity (u · v, vectors are unit-normalized)
-    # Profiled: ~1.4ms for 7,500 × 384 float32 on CPU. np.argsort is faster than argpartition
-    # at this scale (confirmed by profiling: argsort=1.4ms vs argpartition=9.6ms).
-    similarity_scores = np.dot(embeddings_matrix, query_vec)
+    # Push down metadata filters to ChromaDB vector search
+    where_clause = _build_chroma_where(
+        min_price=min_price,
+        max_price=max_price,
+        brand=brand_filter,
+        category=category_filter,
+    )
 
-    # Select top-K indices
-    if min_similarity > 0.0:
-        valid_indices = np.where(similarity_scores >= min_similarity)[0]
-        if valid_indices.size == 0:
-            return []
-        top_indices = valid_indices[np.argsort(similarity_scores[valid_indices])[::-1]][:limit]
-    else:
-        top_indices = np.argsort(similarity_scores)[::-1][:limit]
+    id_to_score: Dict[int, float] = {}
 
-    if len(top_indices) == 0:
+    for q_vec_list in query_vectors_to_search:
+        try:
+            query_kwargs = {
+                "query_embeddings": [q_vec_list],
+                "n_results": min(limit, collection.count() or limit),
+                "include": ["metadatas", "distances"],
+            }
+            if where_clause:
+                query_kwargs["where"] = where_clause
+
+            query_res = collection.query(**query_kwargs)
+
+            if query_res and query_res.get("ids") and query_res["ids"][0]:
+                raw_ids = query_res["ids"][0]
+                raw_distances = query_res["distances"][0]
+                for str_id, dist in zip(raw_ids, raw_distances):
+                    pid = int(str_id)
+                    sim_score = max(0.0, min(1.0, 1.0 - (float(dist) / 2.0)))
+                    if sim_score >= min_similarity:
+                        id_to_score[pid] = max(id_to_score.get(pid, 0.0), sim_score)
+        except Exception:
+            continue
+
+    if not id_to_score:
         return []
 
-    # Extract top product IDs and corresponding scores
-    top_product_ids = [int(product_ids[idx]) for idx in top_indices]
-    id_to_score = {int(product_ids[idx]): float(similarity_scores[idx]) for idx in top_indices}
+    # Sort product IDs by best semantic similarity score
+    sorted_pids = sorted(id_to_score.keys(), key=lambda pid: id_to_score[pid], reverse=True)[:limit]
 
-    # Fetch ONLY the top matching Product records from PostgreSQL
-    products = db.query(Product).filter(Product.id.in_(top_product_ids)).all()
+    # Fetch matching Product records from PostgreSQL
+    products = db.query(Product).filter(Product.id.in_(sorted_pids)).all()
     if not products:
         return []
 
     id_to_product = {p.id: p for p in products}
 
     # Construct results list preserving exact semantic ranking order
-    results = []
-    for p_id in top_product_ids:
+    results: List[SemanticSearchResult] = []
+    for p_id in sorted_pids:
         if p_id in id_to_product:
             results.append(
                 SemanticSearchResult(

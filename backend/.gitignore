@@ -21,6 +21,8 @@ __pycache__/
 *.sqlite
 *.sqlite3
 *.db
+data/chroma/*
+!data/chroma/.gitkeep
 
 # Testing and coverage
 .pytest_cache/

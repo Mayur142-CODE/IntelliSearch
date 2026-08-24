@@ -1,5 +1,5 @@
 """
-Fuzzy Search Service Module — Multi-Path Candidate Retrieval
+Fuzzy Search Service Module — Multi-Path Candidate Retrieval with Push-Down Filtering
 
 Performance & Recall Design:
 -----------------------------
@@ -10,27 +10,17 @@ All paths are query-agnostic — no hardcoded product vocabulary.
 Path 1 — Primary GIN-indexed pre-filter (default pg_trgm threshold ~0.3):
    Uses the `%` operator on product_name and brand GIN trigram indexes.
    Fastest path (~5-20ms). Handles well-formed queries and mild typos.
-   Example: 'nike' -> 54 candidates, 'samsng phone' -> 119 candidates.
 
 Path 2 — Lowered threshold GIN pre-filter (threshold 0.1):
    Activated when Path 1 returns 0 candidates. Temporarily lowers
-   pg_trgm.similarity_threshold to 0.1 via SET LOCAL (transaction-scoped,
-   automatically reverts). Still uses GIN index (~20-100ms).
-   Catches moderate typos where trigram overlap is low but non-zero.
-   Example: 'lptop' -> 98 candidates (sim=0.098 to 'laptop').
+   pg_trgm.similarity_threshold to 0.1 via SET LOCAL (transaction-scoped).
 
 Path 3 — Word-similarity fallback (bounded sequential scan):
    Activated when Path 2 also returns 0 candidates. Uses explicit
-   word_similarity() function to find products where query tokens match
-   individual words within product text fields. Bounded by LIMIT 200.
-   Catches prefix-of-word matches where the target word doesn't appear
-   as a standalone substring. (~10-50ms).
+   word_similarity() function. Bounded by LIMIT 200.
 
-All three paths feed into the same scoring CTE. The scoring formula
-is identical across paths — only the candidate source differs.
-
-Scoring formula: Multi-token weighted combination of word_similarity and
-similarity across product_name (50%), brand (20%), category (15%), tags (15%).
+Push-Down Hard Constraints:
+   Accepts min_price and max_price to filter candidates directly within SQL.
 """
 
 from dataclasses import dataclass
@@ -40,7 +30,6 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.models.product import Product
-
 
 # Candidate limit for fallback paths to bound scoring cost
 _FALLBACK_CANDIDATE_LIMIT = 200
@@ -92,7 +81,6 @@ def _token_score_sql(token: str, alias: str = "p") -> str:
 def _fuzzy_score_sql(tokens: List[str], query: str, alias: str = "p") -> str:
     """
     Build complete multi-token fuzzy score SQL expression.
-    Preserves the original scoring formula exactly:
     - 1 token: token_score*0.75 + full_name_sim*0.25
     - N tokens: avg_tok*0.60 + avg_tok*coverage*0.25 + full_name_sim*0.15
     """
@@ -138,7 +126,6 @@ def _build_ws_conditions(tokens: List[str], threshold: float = 0.35) -> List[str
     """
     Build strict_word_similarity conditions for fallback path.
     Searches product_name, brand, and category.
-    No index required — bounded by LIMIT in the CTE.
     """
     conditions = []
     for t in tokens:
@@ -155,8 +142,18 @@ def _build_scored_cte_sql(
     score_sql: str,
     min_similarity: float,
     limit: int,
+    min_price: Optional[float] = None,
+    max_price: Optional[float] = None,
 ) -> str:
-    """Build the full SQL with candidates CTE + scored CTE + final SELECT."""
+    """Build the full SQL with candidates CTE + scored CTE + final SELECT and push-down price filtering."""
+    price_clauses = []
+    if min_price is not None:
+        price_clauses.append("price >= :min_price")
+    if max_price is not None:
+        price_clauses.append("price <= :max_price")
+
+    price_where = f" AND {' AND '.join(price_clauses)}" if price_clauses else ""
+
     return f"""
         {candidates_cte},
         scored AS (
@@ -170,15 +167,15 @@ def _build_scored_cte_sql(
         SELECT id, product_name, description, brand, category,
                tags, price, image, fuzzy_score
         FROM scored
-        WHERE fuzzy_score >= :min_sim
+        WHERE fuzzy_score >= :min_sim{price_where}
         ORDER BY fuzzy_score DESC
         LIMIT :lim
     """
 
 
-def _execute_and_fetch(db: Session, sql_str: str, min_sim: float, limit: int):
+def _execute_and_fetch(db: Session, sql_str: str, params: Dict[str, Any]):
     """Execute a CTE query and return raw rows."""
-    return db.execute(text(sql_str), {"min_sim": min_sim, "lim": limit}).fetchall()
+    return db.execute(text(sql_str), params).fetchall()
 
 
 def _build_results(db: Session, rows) -> List[FuzzySearchResult]:
@@ -206,24 +203,13 @@ def fuzzy_search_products(
     db: Session,
     query: str,
     limit: int = 50,
+    min_price: Optional[float] = None,
+    max_price: Optional[float] = None,
     min_similarity: float = 0.01,
 ) -> List[FuzzySearchResult]:
     """
     Perform token-aware & field-weighted PostgreSQL pg_trgm fuzzy search
-    using multi-path candidate retrieval for robust recall.
-
-    Path 1: GIN % at default threshold (0.3) — fast, handles mild typos.
-    Path 2: GIN % at lowered threshold (0.1) — catches moderate typos.
-    Path 3: word_similarity() bounded scan — catches prefix-of-word matches.
-
-    Args:
-        db: SQLAlchemy database session.
-        query: Raw search query string.
-        limit: Maximum candidates to return (default 50).
-        min_similarity: Minimum fuzzy score threshold (default 0.01).
-
-    Returns:
-        List of FuzzySearchResult objects in descending score order.
+    using multi-path candidate retrieval with push-down price filtering.
     """
     cleaned_query = query.strip()
     if not cleaned_query:
@@ -236,39 +222,42 @@ def fuzzy_search_products(
     score_sql = _fuzzy_score_sql(tokens, cleaned_query, alias="p")
     gin_conds = _build_gin_conditions(tokens)
 
-    # If no token is long enough for trigram matching, skip fuzzy entirely
     if not gin_conds:
         return []
 
     gin_where = " OR ".join(gin_conds)
+    params: Dict[str, Any] = {"min_sim": min_similarity, "lim": limit}
+    if min_price is not None:
+        params["min_price"] = float(min_price)
+    if max_price is not None:
+        params["max_price"] = float(max_price)
 
     # ------------------------------------------------------------------
     # PATH 1: GIN % at default threshold (0.3)
-    # Fastest path. Uses existing GIN trigram indexes. ~5-20ms.
     # ------------------------------------------------------------------
     candidates_cte = f"WITH candidates AS (SELECT DISTINCT id FROM products WHERE {gin_where})"
-    sql_str = _build_scored_cte_sql(candidates_cte, score_sql, min_similarity, limit)
-    rows = _execute_and_fetch(db, sql_str, min_similarity, limit)
+    sql_str = _build_scored_cte_sql(
+        candidates_cte, score_sql, min_similarity, limit, min_price=min_price, max_price=max_price
+    )
+    rows = _execute_and_fetch(db, sql_str, params)
 
     if rows:
         return _build_results(db, rows)
 
     # ------------------------------------------------------------------
     # PATH 2: GIN % with lowered threshold (0.1)
-    # Catches moderate typos like 'lptop'->'laptop', 'botle'->'bottle'.
-    # SET LOCAL is transaction-scoped — automatically reverts at
-    # transaction end, safe for connection pooling.
-    # Still uses GIN index (confirmed by EXPLAIN ANALYZE). ~20-100ms.
     # ------------------------------------------------------------------
     candidates_cte_limited = (
         f"WITH candidates AS ("
         f"SELECT DISTINCT id FROM products WHERE {gin_where} LIMIT {_FALLBACK_CANDIDATE_LIMIT})"
     )
-    sql_str = _build_scored_cte_sql(candidates_cte_limited, score_sql, min_similarity, limit)
+    sql_str = _build_scored_cte_sql(
+        candidates_cte_limited, score_sql, min_similarity, limit, min_price=min_price, max_price=max_price
+    )
 
     try:
         db.execute(text("SET LOCAL pg_trgm.similarity_threshold = 0.1"))
-        rows = _execute_and_fetch(db, sql_str, min_similarity, limit)
+        rows = _execute_and_fetch(db, sql_str, params)
     finally:
         db.execute(text("RESET pg_trgm.similarity_threshold"))
 
@@ -277,8 +266,6 @@ def fuzzy_search_products(
 
     # ------------------------------------------------------------------
     # PATH 3: word_similarity() fallback (bounded sequential scan)
-    # Catches queries where the target word exists within product text
-    # but has low overall similarity. Bounded by LIMIT 200. ~10-50ms.
     # ------------------------------------------------------------------
     ws_conds = _build_ws_conditions(tokens, threshold=0.35)
     if ws_conds:
@@ -287,12 +274,12 @@ def fuzzy_search_products(
             f"WITH candidates AS ("
             f"SELECT DISTINCT id FROM products WHERE {ws_where} LIMIT {_FALLBACK_CANDIDATE_LIMIT})"
         )
-        sql_str = _build_scored_cte_sql(candidates_cte_ws, score_sql, min_similarity, limit)
-        rows = _execute_and_fetch(db, sql_str, min_similarity, limit)
+        sql_str = _build_scored_cte_sql(
+            candidates_cte_ws, score_sql, min_similarity, limit, min_price=min_price, max_price=max_price
+        )
+        rows = _execute_and_fetch(db, sql_str, params)
 
         if rows:
             return _build_results(db, rows)
 
-    # All paths exhausted — no fuzzy candidates found.
-    # Semantic search layer handles these queries independently.
     return []

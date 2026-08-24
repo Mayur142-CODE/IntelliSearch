@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-18T13:25:05.186864+00:00",
+  "timestamp": "2026-08-24T17:11:28.001436+00:00",
   "checks": [
     {
       "check": "Database Connection",
@@ -27,9 +27,9 @@
       "detail": "Columns: ['id', 'product_name', 'description', 'brand', 'category', 'tags', 'price', 'image']"
     },
     {
-      "check": "Embedding Alignment",
+      "check": "ChromaDB Vector Store",
       "status": "PASS",
-      "detail": "Embeddings: 7500, Product IDs: 7500, DB: 7500 (aligned)"
+      "detail": "Vectors in ChromaDB: 7500, DB Products: 7500 (aligned)"
     },
     {
       "check": "pg_trgm Extension",
@@ -61,5 +61,6 @@
     "price",
     "image"
   ],
+  "chroma_vector_count": 7500,
   "overall": "PASS"
 }

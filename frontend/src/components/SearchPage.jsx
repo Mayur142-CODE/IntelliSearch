@@ -4,6 +4,7 @@ import { ProductCard } from "./ProductCard";
 import { LoadingGrid, EmptyState, ErrorState } from "./SearchStates";
 import { searchProducts } from "../lib/api";
 import { useDebounced } from "../lib/useDebounced";
+import { SlidersHorizontal, Sparkles, Tag } from "lucide-react";
 
 const EXAMPLES = [
   "nike",
@@ -26,6 +27,7 @@ export function SearchPage() {
 
   const [suggestions, setSuggestions] = useState([]);
   const [results, setResults] = useState(null);
+  const [interpretation, setInterpretation] = useState(null);
   const [status, setStatus] = useState("idle"); // idle | loading | success | error
   const [error, setError] = useState("");
   const [elapsed, setElapsed] = useState(0);
@@ -38,6 +40,7 @@ export function SearchPage() {
     if (!q) {
       setSubmitted("");
       setResults(null);
+      setInterpretation(null);
       setSuggestions([]);
       setStatus("idle");
       return;
@@ -53,13 +56,14 @@ export function SearchPage() {
     searchAbort.current = controller;
     const started = performance.now();
 
-    searchProducts(q, { signal: controller.signal, limit: 10 })
+    searchProducts(q, { signal: controller.signal, limit: 12 })
       .then((data) => {
         if (controller.signal.aborted) return;
         setElapsed(performance.now() - started);
         const resList = data?.results ?? [];
         setResults(resList);
         setSuggestions(resList);
+        setInterpretation(data?.interpretation ?? null);
         setStatus("success");
       })
       .catch((err) => {
@@ -75,6 +79,7 @@ export function SearchPage() {
     if (!q) {
       setSuggestions([]);
       setResults(null);
+      setInterpretation(null);
       setStatus("idle");
       return;
     }
@@ -88,13 +93,14 @@ export function SearchPage() {
     setSubmitted(q);
     setError("");
 
-    searchProducts(q, { signal: controller.signal, limit: 10 })
+    searchProducts(q, { signal: controller.signal, limit: 12 })
       .then((data) => {
         if (controller.signal.aborted) return;
         setElapsed(performance.now() - started);
         const resList = data?.results ?? [];
         setResults(resList);
         setSuggestions(resList);
+        setInterpretation(data?.interpretation ?? null);
         setStatus("success");
       })
       .catch((err) => {
@@ -108,16 +114,24 @@ export function SearchPage() {
     };
   }, [debounced]);
 
+  const hasInterpretation = interpretation && (
+    interpretation.detected_brands?.length > 0 ||
+    interpretation.detected_categories?.length > 0 ||
+    interpretation.min_price != null ||
+    interpretation.max_price != null ||
+    interpretation.soft_preferences?.length > 0
+  );
+
   return (
     <main className="min-h-screen bg-background">
       <header className="border-b border-border bg-card">
         <div className="mx-auto max-w-6xl px-4 py-5 flex items-center justify-between">
           <div>
             <h1 className="text-lg font-semibold tracking-tight text-foreground">IntelliSearch</h1>
-            <p className="text-sm text-muted-foreground">Offline Intelligent Product Search</p>
+            <p className="text-sm text-muted-foreground">Offline AI Hybrid Product Search Engine</p>
           </div>
           <div className="hidden sm:flex items-center gap-1.5 rounded-full border border-border bg-muted/50 px-3 py-1 text-xs text-muted-foreground">
-            <span className="font-medium text-foreground">Hybrid Engine</span>
+            <span className="font-medium text-foreground">ChromaDB + PostgreSQL</span>
             <span>· Exact · Partial · Fuzzy · Semantic</span>
           </div>
         </div>
@@ -133,6 +147,36 @@ export function SearchPage() {
           open={open}
           setOpen={setOpen}
         />
+
+        {/* Dynamic Query Interpretation Badge Strip */}
+        {hasInterpretation && (
+          <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-border/80 bg-muted/40 px-3 py-2 text-xs">
+            <div className="flex items-center gap-1 font-medium text-foreground">
+              <Sparkles className="h-3.5 w-3.5 text-primary" />
+              <span>Query Understanding:</span>
+            </div>
+            {interpretation.detected_brands?.map((b) => (
+              <span key={b} className="rounded bg-primary/10 px-2 py-0.5 font-medium text-primary">
+                Brand: {b}
+              </span>
+            ))}
+            {interpretation.detected_categories?.map((c) => (
+              <span key={c} className="rounded bg-secondary px-2 py-0.5 font-medium text-secondary-foreground">
+                Category: {c}
+              </span>
+            ))}
+            {(interpretation.min_price != null || interpretation.max_price != null) && (
+              <span className="rounded bg-emerald-500/10 px-2 py-0.5 font-medium text-emerald-600 dark:text-emerald-400">
+                Price: {interpretation.min_price != null ? `≥ ₹${interpretation.min_price}` : ""} {interpretation.max_price != null ? `≤ ₹${interpretation.max_price}` : ""}
+              </span>
+            )}
+            {interpretation.soft_preferences?.map((pref) => (
+              <span key={pref} className="rounded bg-muted px-2 py-0.5 text-muted-foreground">
+                Intent: {pref}
+              </span>
+            ))}
+          </div>
+        )}
 
         <div className="mt-4 flex flex-wrap items-center gap-2">
           <span className="text-xs text-muted-foreground">Try:</span>
@@ -165,8 +209,8 @@ export function SearchPage() {
                 <span>{results.length} results</span>
                 <span>{elapsed.toFixed(0)} ms</span>
               </div>
-              <div className="sm:hidden text-xs text-muted-foreground">
-                Hybrid Search (Exact · Partial · Fuzzy · Semantic)
+              <div className="text-xs text-muted-foreground">
+                Hybrid Vector Retrieval & Reranking
               </div>
             </div>
             {results.length === 0 ? (
@@ -183,7 +227,7 @@ export function SearchPage() {
 
         {status === "idle" && (
           <p className="py-16 text-center text-sm text-muted-foreground">
-            Start typing to search the product index using the hybrid ranking engine.
+            Start typing to search 7,500 products using the dynamic ChromaDB hybrid engine.
           </p>
         )}
       </section>

@@ -52,10 +52,9 @@ from app.services.search_ranking import (
     _get_partial_candidates,
 )
 from app.services.semantic_search import (
+    CHROMA_DIR,
     EMBEDDING_DIMENSION,
-    EMBEDDINGS_FILE,
     MODEL_DIR,
-    PRODUCT_IDS_FILE,
     _get_query_embedding,
     get_semantic_search_resources,
 )
@@ -183,59 +182,43 @@ def run_benchmark():
         sys.exit(1)
 
     # ----------------------------------------------------
-    # STAGE 3: Loading product_embeddings.npy
+    # STAGE 3: Inspecting ChromaDB Vector Store
     # ----------------------------------------------------
-    log_stage(3, f"Loading embeddings file from {EMBEDDINGS_FILE.name}...")
-    if not EMBEDDINGS_FILE.exists():
-        print(f"[ERROR] Embeddings file missing: {EMBEDDINGS_FILE}", flush=True)
+    log_stage(3, f"Connecting to ChromaDB vector store at {CHROMA_DIR.name}...")
+    if not CHROMA_DIR.exists():
+        print(f"[ERROR] ChromaDB directory missing: {CHROMA_DIR}", flush=True)
         db.close()
         sys.exit(1)
 
     try:
-        embeddings_matrix = np.load(EMBEDDINGS_FILE)
-        num_embeddings = int(embeddings_matrix.shape[0])
-        embedding_dim = int(embeddings_matrix.shape[1])
-        embedding_dtype = str(embeddings_matrix.dtype)
-        emb_file_size_mb = format_mb(os.path.getsize(EMBEDDINGS_FILE))
+        import chromadb
+        client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+        col = client.get_collection("products")
+        num_embeddings = col.count()
+        embedding_dim = EMBEDDING_DIMENSION
+        chroma_size_bytes = sum(f.stat().st_size for f in CHROMA_DIR.rglob('*') if f.is_file())
+        chroma_size_mb = format_mb(chroma_size_bytes)
         log_stage(
             3,
-            f"Loaded {num_embeddings} embeddings ({embedding_dim}-dim, {embedding_dtype}, {emb_file_size_mb} MB).",
+            f"Loaded ChromaDB collection 'products' with {num_embeddings} vectors ({embedding_dim}-dim, {chroma_size_mb} MB).",
         )
     except Exception as e:
-        print(f"[ERROR] Failed to load embeddings matrix: {e}", flush=True)
-        db.close()
-        sys.exit(1)
-
-    # ----------------------------------------------------
-    # STAGE 4: Loading product_ids.npy
-    # ----------------------------------------------------
-    log_stage(4, f"Loading product IDs file from {PRODUCT_IDS_FILE.name}...")
-    if not PRODUCT_IDS_FILE.exists():
-        print(f"[ERROR] Product IDs file missing: {PRODUCT_IDS_FILE}", flush=True)
-        db.close()
-        sys.exit(1)
-
-    try:
-        product_ids_array = np.load(PRODUCT_IDS_FILE)
-        num_product_ids = len(product_ids_array)
-        log_stage(4, f"Loaded {num_product_ids} product IDs.")
-    except Exception as e:
-        print(f"[ERROR] Failed to load product IDs: {e}", flush=True)
+        print(f"[ERROR] Failed to load ChromaDB collection: {e}", flush=True)
         db.close()
         sys.exit(1)
 
     # Validate dataset consistency
-    if num_embeddings != num_product_ids or num_embeddings != db_product_count:
+    if num_embeddings != db_product_count:
         print(
             f"[ERROR] Mismatch! DB products: {db_product_count}, "
-            f"Embeddings: {num_embeddings}, Product IDs: {num_product_ids}",
+            f"ChromaDB Vectors: {num_embeddings}",
             flush=True,
         )
         db.close()
         sys.exit(1)
 
     # ----------------------------------------------------
-    # STAGE 5: Model Directory Size Calculation
+    # STAGE 4: Model Directory Size Calculation
     # ----------------------------------------------------
     log_stage(5, f"Inspecting local model directory at {MODEL_DIR.name}...")
     model_name_simple = "all-MiniLM-L6-v2"
@@ -453,8 +436,7 @@ def run_benchmark():
     print(f"  Products:            {db_product_count}", flush=True)
     print(f"  Embeddings:          {num_embeddings}", flush=True)
     print(f"  Embedding dimensions:{embedding_dim}", flush=True)
-    print(f"  Embedding dtype:     {embedding_dtype}", flush=True)
-    print(f"  Embedding file size: {emb_file_size_mb} MB", flush=True)
+    print(f"  Vector Store:        ChromaDB ({chroma_size_mb} MB)", flush=True)
 
     print("\nModel", flush=True)
     print("-----", flush=True)
@@ -477,45 +459,47 @@ def run_benchmark():
 
     print("\nWarm Search Performance (per query)", flush=True)
     print("------------------------------------", flush=True)
-    print(f"  {'Query':<32} {'Type':<12} {'Avg ms':<10} {'Min ms':<10} {'Max ms'}", flush=True)
-    print(f"  {'-'*80}", flush=True)
     for res in query_benchmark_results:
+        q = res["query"]
+        q_type = res["type"]
+        avg_ms = res["avg_ms"]
+        min_ms = res["min_ms"]
+        max_ms = res["max_ms"]
+        target_str, _ = type_targets.get(q_type, ("< 500 ms", 500.0))
         print(
-            f"  {res['query']:<32} {res['type']:<12} "
-            f"{res['avg_ms']:<10.2f} {res['min_ms']:<10.2f} {res['max_ms']:.2f}",
+            f"  [{q_type:<9}] '{q[:32]:<32}': Avg {avg_ms:6.2f} ms "
+            f"(Min: {min_ms:6.2f}, Max: {max_ms:6.2f}) [Target: {target_str}]",
             flush=True,
         )
 
-    print("\nPer-Type Aggregation (warm)", flush=True)
-    print("---------------------------", flush=True)
+    print("\nWarm Search Summary by Type", flush=True)
+    print("----------------------------", flush=True)
     for q_type, stats in type_summary.items():
-        target_str, target_val = type_targets.get(q_type, ("", 9999))
-        status = "PASS" if stats["avg_ms"] <= target_val else "FAIL"
+        target_str, target_val = type_targets.get(q_type, ("< 500 ms", 500.0))
+        status = "[PASS]" if stats["avg_ms"] <= target_val else "[FAIL]"
         print(
-            f"  {q_type:<12}: Avg {stats['avg_ms']:.2f} ms  "
-            f"(target {target_str}) [{status}]",
+            f"  {status} {q_type:<10}: Avg {stats['avg_ms']:6.2f} ms "
+            f"(Median: {stats['median_ms']:6.2f}, Min: {stats['min_ms']:6.2f}, "
+            f"Max: {stats['max_ms']:6.2f}) Target: {target_str}",
             flush=True,
         )
 
-    print("\nOverall Warm Search", flush=True)
-    print("-------------------", flush=True)
-    print(f"  Average:   {overall_avg_ms} ms", flush=True)
-    print(f"  Median:    {overall_median_ms} ms", flush=True)
-    print(f"  Min:       {overall_min_ms} ms", flush=True)
-    print(f"  Max:       {overall_max_ms} ms", flush=True)
+    print("\nHTTP API Benchmark", flush=True)
+    print("------------------", flush=True)
+    if api_measurement_mode == "live_measured":
+        print(f"  Status:              Server available (live measurements)", flush=True)
+        print(f"  Measured average:    {avg_api_latency_ms} ms", flush=True)
+        print(f"  Target:              < 500 ms", flush=True)
+        api_target_pass = "[PASS]" if avg_api_latency_ms <= 500.0 else "[FAIL]"
+        print(f"  Result:              {api_target_pass}", flush=True)
+    else:
+        print(f"  Status:              Server not running (skipped cleanly)", flush=True)
+        print(f"  Note:                Start server with 'uvicorn app.main:app' and re-run", flush=True)
 
-    print("\nHTTP API (wall-clock, includes network)", flush=True)
-    print("---------------------------------------", flush=True)
-    print(f"  Status:              {api_measurement_mode}", flush=True)
-    if avg_api_latency_ms is not None:
-        print(f"  Average API latency: {avg_api_latency_ms} ms", flush=True)
-
-    print("\nEmbedding Generation (offline, one-time)", flush=True)
-    print("----------------------------------------", flush=True)
-    print(f"  Generation time:     {generation_time_str}", flush=True)
-
-    print("\nTarget Check (warm average < 1,000 ms)", flush=True)
-    print("--------------------------------------", flush=True)
+    print("\nOverall Performance Target Check", flush=True)
+    print("---------------------------------", flush=True)
+    is_under_1s = overall_avg_ms <= 1000.0
+    target_status = "[PASS] All queries averaged under 1.0s" if is_under_1s else "[FAIL] Average exceeded 1.0s"
     print(f"  Measured average:    {overall_avg_ms} ms", flush=True)
     print(f"  Target:              < 1000 ms", flush=True)
     print(f"  Result:              {target_status}", flush=True)
@@ -531,8 +515,8 @@ def run_benchmark():
             "products_count": db_product_count,
             "embeddings_count": num_embeddings,
             "embedding_dimensions": embedding_dim,
-            "embedding_dtype": embedding_dtype,
-            "embedding_file_size_mb": emb_file_size_mb,
+            "vector_store": "ChromaDB",
+            "chroma_dir_size_mb": chroma_size_mb,
         },
         "model": {
             "name": model_name_simple,

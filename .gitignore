@@ -46,6 +46,10 @@ build/
 backend/models/*
 !backend/models/.gitkeep
 
+# ChromaDB Vector Store Data
+backend/data/chroma/*
+!backend/data/chroma/.gitkeep
+
 # Logs & Temporary Files
 *.log
 logs/

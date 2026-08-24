@@ -41,13 +41,27 @@ def run_test():
             "nik shose",
             "samsng phone",
             "wireles hedphone",
+            "nyke",
+            "addidas",
         ]),
-        ("SEMANTIC QUERIES", [
+        ("PRICE RANGE QUERIES", [
+            "laptops under 500",
+            "laptops between 300 and 700",
+            "phones 200 to 400",
+            "headphones above 500",
+        ]),
+        ("COMBINED CONSTRAINT QUERIES", [
+            "nyke shoes under 500",
+            "nike running shoes below 1000",
+            "addidas shoes between 200 and 800",
+        ]),
+        ("SEMANTIC CONCEPTUAL QUERIES", [
             "something to carry my laptop",
             "device for listening to music",
             "shoes for morning running",
             "something to charge my phone",
             "bag for traveling",
+            "good laptop for programming",
         ]),
         ("BRAND QUERIES", [
             "anker",
@@ -68,7 +82,6 @@ def run_test():
         ]),
     ]
 
-
     session = SessionLocal()
 
     try:
@@ -84,11 +97,11 @@ def run_test():
                 print("-" * 115)
                 print(
                     f"{'FINAL':<7} | {'EXACT':<6} | {'PARTIAL':<7} | {'FUZZY':<6} | {'SEMANTIC':<8} | "
-                    f"{'BRAND':<14} | {'CATEGORY':<16} | {'PRODUCT NAME'}"
+                    f"{'PRICE':<8} | {'BRAND':<14} | {'PRODUCT NAME'}"
                 )
                 print("-" * 115)
 
-                results = search_products(
+                results, parsed = search_products(
                     db=session,
                     query=query,
                     limit=5,
@@ -106,14 +119,14 @@ def run_test():
                     p_score = f"{r.partial_score:.2f}"
                     fz_score = f"{r.fuzzy_score:.2f}"
                     s_score = f"{r.semantic_score:.2f}"
+                    price_str = f"Rs{float(p.price):.2f}"
 
                     brand_str = (p.brand[:13] + "..") if len(p.brand) > 13 else p.brand
-                    cat_str = (p.category[:15] + "..") if len(p.category) > 15 else p.category
-                    name_str = (p.product_name[:32] + "..") if len(p.product_name) > 32 else p.product_name
+                    name_str = (p.product_name[:35] + "..") if len(p.product_name) > 35 else p.product_name
 
                     print(
                         f"{f_score:<7} | {e_score:<6} | {p_score:<7} | {fz_score:<6} | {s_score:<8} | "
-                        f"{brand_str:<14} | {cat_str:<16} | {name_str}"
+                        f"{price_str:<8} | {brand_str:<14} | {name_str}"
                     )
 
         print("\n" + "=" * 115)

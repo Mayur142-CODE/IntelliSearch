@@ -1,43 +1,53 @@
 """
-Combined Search Ranking Engine
+Combined Hybrid Search Ranking Engine — Hardened v2
 
-Architecture Design & 4-Source Candidate Generation:
----------------------------------------------------
-1. Candidate Generation Layer (4 Independent Sources):
-   - Exact Candidates: Direct SQL query for exact matches on product_name, brand, category, or tags.
-   - Partial Candidates: Direct SQL ILIKE query for token prefix and substring matches.
-   - Fuzzy Candidates: PostgreSQL pg_trgm trigram fuzzy search candidates (top N).
-   - Semantic Candidates: FastEmbed vector cosine similarity candidates (top N).
+Architecture & Pipeline Design:
+-------------------------------
+1. Dynamic Query Understanding:
+   - parse_query() returns ParsedQuery consumed by all downstream stages.
+   - No stage re-parses the raw string.
 
-2. Candidate Union & Multi-Signal Scoring Engine (Scores 0.0 - 1.0):
-   - Forms a complete UNION of candidates by product ID across all 4 sources.
-   - Evaluates:
-     * exact_score (20% weight): Exact string & token set matches.
-     * partial_score (15% weight): Prefix and token substring matches across attributes.
-     * fuzzy_score (30% weight): PostgreSQL pg_trgm similarity score.
-     * semantic_score (35% weight): FastEmbed dense vector cosine similarity score.
+2. 4-Source Push-Down Candidate Generation:
+   - Exact: SQL match with price push-down, using SEMANTIC_QUERY (price-stripped).
+   - Partial: SQL ILIKE with price push-down, using SEMANTIC_QUERY.
+   - Fuzzy: pg_trgm trigram search with price push-down, using SEMANTIC_QUERY.
+   - Semantic: ChromaDB vector search with price metadata push-down.
 
-3. Final Weighted Ranking Formula (Unchanged):
-   final_score = (exact_score * 0.20) + (partial_score * 0.15) + (fuzzy_score * 0.30) + (semantic_score * 0.35)
+3. Candidate UNION by product ID (dedupe, keep max score per source).
+
+4. Hard Constraints (§4.4 — defense in depth):
+   - Price: mathematically exact, NEVER relaxed.
+   - Brand: hard filter when explicit non-comparative query.
+
+5. Concept Filter (§5):
+   - Category anchor hard-filter for explicit product queries.
+
+6. Hybrid Ranking (§6):
+   - Min-max normalize each signal within current candidate set.
+   - Named constants from search_config.py.
+   - Stable tie-break: final_score DESC, semantic DESC, fuzzy DESC, product_id ASC.
+
+7. Debug mode exposes full diagnostic breakdown per candidate.
 """
 
-from dataclasses import dataclass
-from typing import Any, Dict, List
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+from rapidfuzz import fuzz
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.product import Product
 from app.services.fuzzy_search import fuzzy_search_products
-from app.services.semantic_search import (
-    compute_query_similarities,
-    semantic_search_products,
+from app.services.query_parser import ParsedQuery, parse_query
+from app.services.semantic_search import semantic_search_products
+from app.services.search_config import (
+    SEMANTIC_WEIGHT, FUZZY_WEIGHT, EXACT_WEIGHT, PARTIAL_WEIGHT,
+    BRAND_MATCH_BONUS, CONCEPT_MATCH_BONUS, PREFERENCE_BOOST,
+    MIN_FINAL_SCORE, MIN_FINAL_SCORE_WEAK,
+    STRONG_SIGNAL_FUZZY_MIN, STRONG_SIGNAL_SEMANTIC_MIN,
+    CATEGORY_FUZZY_BAND,
 )
-
-# Scoring Signal Weights (Tunable Constants)
-EXACT_WEIGHT = 0.20
-PARTIAL_WEIGHT = 0.15
-FUZZY_WEIGHT = 0.30
-SEMANTIC_WEIGHT = 0.35
 
 
 @dataclass
@@ -49,9 +59,13 @@ class CombinedSearchResult:
     fuzzy_score: float
     semantic_score: float
     final_score: float
+    brand_match: bool = False
+    category_match: bool = False
+    preference_score: float = 0.0
+    candidate_sources: List[str] = field(default_factory=list)
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
+    def to_dict(self, debug: bool = False) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
             "id": self.product.id,
             "product_name": self.product.product_name,
             "description": self.product.description,
@@ -60,52 +74,80 @@ class CombinedSearchResult:
             "tags": self.product.tags,
             "price": float(self.product.price),
             "image": self.product.image,
-            "exact_score": round(self.exact_score, 4),
-            "partial_score": round(self.partial_score, 4),
-            "fuzzy_score": round(self.fuzzy_score, 4),
-            "semantic_score": round(self.semantic_score, 4),
             "final_score": round(self.final_score, 4),
         }
+        if debug:
+            data.update({
+                "exact_score": round(self.exact_score, 4),
+                "partial_score": round(self.partial_score, 4),
+                "fuzzy_score": round(self.fuzzy_score, 4),
+                "semantic_score": round(self.semantic_score, 4),
+                "brand_match": self.brand_match,
+                "category_match": self.category_match,
+                "preference_score": round(self.preference_score, 4),
+                "candidate_sources": self.candidate_sources,
+            })
+        return data
 
 
-def _get_exact_candidates(db: Session, query: str, limit: int = 50) -> List[Product]:
-    """Fetch candidates from PostgreSQL with exact/case-insensitive match on name, brand, category, or tags."""
+# ============================================================================
+# Candidate Retrieval Functions
+# ============================================================================
+
+def _get_exact_candidates(
+    db: Session,
+    query: str,
+    limit: int = 50,
+    min_price: Optional[float] = None,
+    max_price: Optional[float] = None,
+) -> List[Product]:
+    """Fetch candidates with exact match on name, brand, category, or tags.
+
+    Uses parameterized queries for SQL safety.
+    """
     q_clean = query.strip().lower()
     if not q_clean:
         return []
 
-    stmt = (
-        select(Product)
-        .where(
-            or_(
-                func.lower(Product.product_name) == q_clean,
-                func.lower(Product.brand) == q_clean,
-                func.lower(Product.category) == q_clean,
-                Product.tags.ilike(f"%{q_clean}%"),
-            )
+    conditions = [
+        or_(
+            func.lower(Product.product_name) == q_clean,
+            func.lower(Product.brand) == q_clean,
+            func.lower(Product.category) == q_clean,
+            Product.tags.ilike(f"%{q_clean}%"),
         )
-        .limit(limit)
-    )
+    ]
+
+    if min_price is not None:
+        conditions.append(Product.price >= min_price)
+    if max_price is not None:
+        conditions.append(Product.price <= max_price)
+
+    stmt = select(Product).where(*conditions).limit(limit)
     return list(db.scalars(stmt).all())
 
 
-def _get_partial_candidates(db: Session, query: str, limit: int = 50) -> List[Product]:
-    """Fetch candidates from PostgreSQL with token prefix and substring ILIKE matching."""
+def _get_partial_candidates(
+    db: Session,
+    query: str,
+    limit: int = 50,
+    min_price: Optional[float] = None,
+    max_price: Optional[float] = None,
+) -> List[Product]:
+    """Fetch candidates with token prefix/substring ILIKE matching."""
     q_clean = query.strip().lower()
     if not q_clean:
         return []
 
-    tokens = [t for t in q_clean.split() if t]
+    tokens = [t for t in q_clean.split() if len(t) >= 2]
     if not tokens:
         return []
 
-    conditions = []
+    match_conditions = []
     for token in tokens:
-        if len(token) < 2:
-            continue
         prefix_pattern = f"{token}%"
         substring_pattern = f"%{token}%"
-        conditions.extend([
+        match_conditions.extend([
             Product.product_name.ilike(prefix_pattern),
             Product.product_name.ilike(substring_pattern),
             Product.brand.ilike(prefix_pattern),
@@ -116,22 +158,25 @@ def _get_partial_candidates(db: Session, query: str, limit: int = 50) -> List[Pr
             Product.description.ilike(substring_pattern),
         ])
 
-    if not conditions:
+    if not match_conditions:
         return []
 
-    stmt = (
-        select(Product)
-        .where(or_(*conditions))
-        .limit(limit)
-    )
+    query_filters = [or_(*match_conditions)]
+    if min_price is not None:
+        query_filters.append(Product.price >= min_price)
+    if max_price is not None:
+        query_filters.append(Product.price <= max_price)
+
+    stmt = select(Product).where(*query_filters).limit(limit)
     return list(db.scalars(stmt).all())
 
 
+# ============================================================================
+# Scoring Functions
+# ============================================================================
+
 def _calculate_exact_score(query: str, product: Product) -> float:
-    """
-    Calculate normalized exact match score (0.0 - 1.0).
-    Strongest weight for full product_name match, followed by brand, category, tags, and exact token sets.
-    """
+    """Calculate normalized exact match score (0.0 - 1.0)."""
     q_clean = query.strip().lower()
     if not q_clean:
         return 0.0
@@ -139,7 +184,7 @@ def _calculate_exact_score(query: str, product: Product) -> float:
     name = (product.product_name or "").strip().lower()
     brand = (product.brand or "").strip().lower()
     category = (product.category or "").strip().lower()
-    
+
     tags = []
     if product.tags:
         if isinstance(product.tags, list):
@@ -147,29 +192,20 @@ def _calculate_exact_score(query: str, product: Product) -> float:
         else:
             tags = [t.strip().lower() for t in str(product.tags).split(",") if t.strip()]
 
-    # 1. Product Name Exact Full Match
     if q_clean == name:
         return 1.0
-
-    # 2. Brand Exact Full Match
     if q_clean == brand:
         return 0.85
-
-    # 3. Category Exact Full Match
     if q_clean == category:
         return 0.75
-
-    # 4. Tag Exact Match
     if q_clean in tags:
         return 0.70
 
-    # 5. Token Set Exact Match (all query tokens match product_name tokens)
     q_tokens = set(t for t in q_clean.split() if t)
     name_tokens = set(t for t in name.split() if t)
 
     if q_tokens and q_tokens == name_tokens:
         return 0.90
-
     if q_tokens and q_tokens.issubset(name_tokens):
         return 0.80
 
@@ -177,10 +213,7 @@ def _calculate_exact_score(query: str, product: Product) -> float:
 
 
 def _calculate_partial_score(query: str, product: Product) -> float:
-    """
-    Calculate normalized prefix and partial match score (0.0 - 1.0).
-    Evaluates prefix and token overlap across product_name (50%), brand (25%), category (15%), and tags (10%).
-    """
+    """Calculate normalized prefix and partial match score (0.0 - 1.0)."""
     q_clean = query.strip().lower()
     if not q_clean:
         return 0.0
@@ -203,7 +236,6 @@ def _calculate_partial_score(query: str, product: Product) -> float:
     def _token_field_score(target_words: List[str]) -> float:
         if not target_words:
             return 0.0
-
         scores = []
         for qt in q_tokens:
             token_max = 0.0
@@ -211,15 +243,12 @@ def _calculate_partial_score(query: str, product: Product) -> float:
                 if tw == qt:
                     token_max = max(token_max, 1.0)
                 elif tw.startswith(qt) and len(qt) >= 2:
-                    # Prefix match score weighted by length ratio with baseline
                     prefix_ratio = len(qt) / float(len(tw))
                     token_max = max(token_max, 0.85 * max(0.70, prefix_ratio))
                 elif qt in tw and len(qt) >= 3:
-                    # Substring match score
                     sub_ratio = len(qt) / float(len(tw))
                     token_max = max(token_max, 0.50 * max(0.60, sub_ratio))
             scores.append(token_max)
-
         return sum(scores) / float(len(q_tokens)) if scores else 0.0
 
     name_score = _token_field_score(name_words)
@@ -227,7 +256,6 @@ def _calculate_partial_score(query: str, product: Product) -> float:
     cat_score = _token_field_score(cat_words)
     tags_score = _token_field_score(tag_words)
 
-    # Weighted combination of partial match signals across product attributes
     partial_combined = (
         (name_score * 0.50) +
         (brand_score * 0.25) +
@@ -238,57 +266,168 @@ def _calculate_partial_score(query: str, product: Product) -> float:
     return min(max(partial_combined, 0.0), 1.0)
 
 
+def _calculate_preference_score(
+    parsed: ParsedQuery,
+    product: Product,
+    min_cand_price: float,
+    max_cand_price: float,
+) -> float:
+    """Calculate soft preference ranking boost based on relative candidate context."""
+    if not parsed.soft_preferences:
+        return 0.0
+
+    pref_score = 0.0
+    price_val = float(product.price)
+    price_range = max(1.0, max_cand_price - min_cand_price)
+
+    # Budget / Cheap / Affordable: relative lower price boost
+    if any(p in parsed.soft_preferences for p in ("budget", "affordable", "cheap")):
+        rel_pos = 1.0 - ((price_val - min_cand_price) / price_range)
+        pref_score = max(pref_score, rel_pos * 0.8)
+
+    # Premium / Luxury: relative higher price boost
+    if any(p in parsed.soft_preferences for p in ("premium", "luxury", "high-end")):
+        rel_pos = (price_val - min_cand_price) / price_range
+        pref_score = max(pref_score, rel_pos * 0.8)
+
+    # Textual attribute preferences (e.g. lightweight, waterproof, comfortable)
+    product_text = f"{product.product_name} {product.description} {product.tags}".lower()
+    for pref in parsed.soft_preferences:
+        if pref not in ("budget", "affordable", "cheap", "premium", "luxury", "high-end"):
+            if pref in product_text:
+                pref_score = max(pref_score, 0.5)
+
+    return min(max(pref_score, 0.0), 1.0)
+
+
+# ============================================================================
+# §5 — Concept Filter
+# ============================================================================
+
+def _apply_concept_filter(
+    candidates: Dict[int, Dict[str, Any]],
+    parsed: ParsedQuery,
+) -> Dict[int, Dict[str, Any]]:
+    """Apply concept filter: when a category anchor is detected, prefer
+    products in that category (or closely related categories).
+
+    This is NOT a hard filter that removes all non-matching products —
+    rather, it removes candidates whose category is clearly unrelated
+    (accessories vs core products) when the query is explicitly about
+    a product type.
+    """
+    if not parsed.detected_category_anchor or not parsed.is_explicit_product_query:
+        return candidates
+
+    anchor = parsed.detected_category_anchor.lower()
+
+    # Identify which candidates match the anchor category
+    matching_ids = set()
+    non_matching_ids = set()
+
+    for p_id, data in candidates.items():
+        product_cat = (data["product"].category or "").lower()
+        # Check exact match or fuzzy match within band
+        if product_cat == anchor:
+            matching_ids.add(p_id)
+        else:
+            cat_similarity = fuzz.ratio(product_cat, anchor)
+            if cat_similarity >= CATEGORY_FUZZY_BAND:
+                matching_ids.add(p_id)
+            else:
+                non_matching_ids.add(p_id)
+
+    # If we have matching products, only keep them
+    # If no matching products at all, return all (don't zero-out results)
+    if matching_ids:
+        return {pid: candidates[pid] for pid in matching_ids}
+
+    return candidates
+
+
+# ============================================================================
+# Main Search Function
+# ============================================================================
+
 def search_products(
     db: Session,
     query: str,
     limit: int = 20,
     candidate_limit: int = 50,
-    min_final_score: float = 0.10,
-) -> List[CombinedSearchResult]:
-    """
-    Perform hybrid product search with a 4-way candidate generation layer.
-
-    Candidate Sources:
-    1. Exact Candidates (PostgreSQL query)
-    2. Prefix/Partial Candidates (PostgreSQL ILIKE query)
-    3. Fuzzy Candidates (PostgreSQL pg_trgm trigram search)
-    4. Semantic Candidates (FastEmbed dense vector cosine similarity)
-
-    Union of all 4 candidate sets is evaluated against exact, partial, fuzzy, and semantic scoring functions.
+    min_price: Optional[float] = None,
+    max_price: Optional[float] = None,
+    min_final_score: float = MIN_FINAL_SCORE,
+    parsed_query: Optional[ParsedQuery] = None,
+) -> Tuple[List[CombinedSearchResult], ParsedQuery]:
+    """Perform 4-source hybrid search with dynamic query understanding,
+    push-down filtering, candidate union, hard constraint verification,
+    concept filtering, and multi-signal reranking.
     """
     cleaned_query = query.strip()
     if not cleaned_query:
-        return []
+        empty_parsed = ParsedQuery(raw_query="", semantic_query="")
+        return [], empty_parsed
 
-    # 1. Exact Candidates from PostgreSQL
-    exact_candidates = _get_exact_candidates(db, cleaned_query, limit=candidate_limit)
+    # ===================================================================
+    # 1. Dynamic Query Understanding
+    # ===================================================================
+    parsed = parsed_query or parse_query(db, cleaned_query)
 
-    # 2. Prefix/Partial Candidates from PostgreSQL
-    partial_candidates = _get_partial_candidates(db, cleaned_query, limit=candidate_limit)
+    # Resolve effective price boundaries (explicit params take priority)
+    eff_min_price = min_price if min_price is not None else parsed.min_price
+    eff_max_price = max_price if max_price is not None else parsed.max_price
 
-    # 3. Fuzzy Candidates from pg_trgm
+    # The SEARCH QUERY for all retrieval paths is the semantic_query
+    # (price-stripped, operator-cleaned) — NOT the raw query
+    search_text = parsed.semantic_query if parsed.semantic_query else cleaned_query
+
+    # ===================================================================
+    # 2. 4-Source Push-Down Candidate Retrieval
+    # ===================================================================
+    # Exact Candidates (PostgreSQL)
+    exact_candidates = _get_exact_candidates(
+        db, search_text, limit=candidate_limit,
+        min_price=eff_min_price, max_price=eff_max_price,
+    )
+
+    # Partial/Prefix Candidates (PostgreSQL)
+    partial_candidates = _get_partial_candidates(
+        db, search_text, limit=candidate_limit,
+        min_price=eff_min_price, max_price=eff_max_price,
+    )
+
+    # Fuzzy Candidates (pg_trgm) — use semantic query
     fuzzy_candidates = fuzzy_search_products(
         db=db,
-        query=cleaned_query,
+        query=search_text,
         limit=candidate_limit,
+        min_price=eff_min_price,
+        max_price=eff_max_price,
         min_similarity=0.01,
     )
 
-    # 4. Semantic Candidates from FastEmbed
+    # Semantic Candidates (ChromaDB) — use normalized variants
     semantic_candidates = semantic_search_products(
         db=db,
-        query=cleaned_query,
+        query=parsed.semantic_query if parsed.semantic_query else search_text,
         limit=candidate_limit,
+        min_price=eff_min_price,
+        max_price=eff_max_price,
         min_similarity=0.0,
+        normalized_queries=parsed.normalized_query_variants,
     )
 
-    # 5. Form Candidate UNION Map by Product ID
+    # ===================================================================
+    # 3. Candidate UNION by Product ID
+    # ===================================================================
     candidate_map: Dict[int, Dict[str, Any]] = {}
 
     for p in exact_candidates:
         candidate_map[p.id] = {
             "product": p,
             "fuzzy_score": 0.0,
+            "semantic_score": 0.0,
+            "sources": {"exact"},
         }
 
     for p in partial_candidates:
@@ -296,68 +435,160 @@ def search_products(
             candidate_map[p.id] = {
                 "product": p,
                 "fuzzy_score": 0.0,
+                "semantic_score": 0.0,
+                "sources": {"partial"},
             }
+        else:
+            candidate_map[p.id]["sources"].add("partial")
 
     for item in fuzzy_candidates:
         p_id = item.product.id
         if p_id in candidate_map:
             candidate_map[p_id]["fuzzy_score"] = max(0.0, float(item.fuzzy_score))
+            candidate_map[p_id]["sources"].add("fuzzy")
         else:
             candidate_map[p_id] = {
                 "product": item.product,
                 "fuzzy_score": max(0.0, float(item.fuzzy_score)),
+                "semantic_score": 0.0,
+                "sources": {"fuzzy"},
             }
 
     for item in semantic_candidates:
         p_id = item.product.id
-        if p_id not in candidate_map:
+        if p_id in candidate_map:
+            candidate_map[p_id]["semantic_score"] = max(0.0, float(item.semantic_score))
+            candidate_map[p_id]["sources"].add("semantic")
+        else:
             candidate_map[p_id] = {
                 "product": item.product,
                 "fuzzy_score": 0.0,
+                "semantic_score": max(0.0, float(item.semantic_score)),
+                "sources": {"semantic"},
             }
 
     if not candidate_map:
-        return []
+        return [], parsed
 
-    # 5b. Compute per-candidate semantic scores from full similarity array.
-    # This ensures that EVERY candidate (including those found only by fuzzy or
-    # partial retrieval) gets its actual semantic similarity score, not just the
-    # semantic top-K. Cost: ~1.4ms dot product + ~1ms dict construction.
-    # The query embedding is LRU-cached, so this reuses the same ONNX output.
-    try:
-        sim_scores, sim_product_ids = compute_query_similarities(cleaned_query)
-        id_to_semantic = dict(
-            zip(sim_product_ids.tolist(), sim_scores.tolist())
-        )
-    except Exception:
-        id_to_semantic = {}
-
-    # 6. Calculate multi-signal scores for each candidate
-    ranked_results: List[CombinedSearchResult] = []
+    # ===================================================================
+    # 4. Absolute Hard-Filter Safety Verification (§4.4)
+    # ===================================================================
+    verified_candidates: Dict[int, Dict[str, Any]] = {}
 
     for p_id, data in candidate_map.items():
+        p: Product = data["product"]
+        p_price = float(p.price)
+
+        # 4a. Absolute Price Check — NEVER relaxed, defense in depth
+        if eff_min_price is not None and p_price < eff_min_price:
+            continue
+        if eff_max_price is not None and p_price > eff_max_price:
+            continue
+
+        # 4b. Explicit Hard Brand Filter
+        if parsed.is_brand_hard_filter and parsed.detected_brands:
+            brand_matched = any(
+                p.brand.strip().lower() == b.strip().lower()
+                for b in parsed.detected_brands
+            )
+            if not brand_matched:
+                continue
+
+        verified_candidates[p_id] = data
+
+    if not verified_candidates:
+        return [], parsed
+
+    # ===================================================================
+    # 5. Concept Filter (§5)
+    # ===================================================================
+    verified_candidates = _apply_concept_filter(verified_candidates, parsed)
+
+    if not verified_candidates:
+        return [], parsed
+
+    # Price range for relative soft preference scoring
+    all_prices = [float(d["product"].price) for d in verified_candidates.values()]
+    min_cand_price = min(all_prices) if all_prices else 0.0
+    max_cand_price = max(all_prices) if all_prices else 1000.0
+
+    # ===================================================================
+    # 6. Multi-Signal Scoring & Reranking (§6)
+    # ===================================================================
+
+    # Collect raw scores for min-max normalization
+    raw_fuzzy_scores = [d["fuzzy_score"] for d in verified_candidates.values()]
+    raw_semantic_scores = [d["semantic_score"] for d in verified_candidates.values()]
+
+    fuzzy_min = min(raw_fuzzy_scores) if raw_fuzzy_scores else 0.0
+    fuzzy_max = max(raw_fuzzy_scores) if raw_fuzzy_scores else 1.0
+    semantic_min = min(raw_semantic_scores) if raw_semantic_scores else 0.0
+    semantic_max = max(raw_semantic_scores) if raw_semantic_scores else 1.0
+
+    def _normalize(val: float, vmin: float, vmax: float) -> float:
+        """Min-max normalize to [0, 1] within current candidate set."""
+        if vmax <= vmin:
+            return 0.5 if val > 0 else 0.0
+        return (val - vmin) / (vmax - vmin)
+
+    ranked_results: List[CombinedSearchResult] = []
+
+    for p_id, data in verified_candidates.items():
         product: Product = data["product"]
-        f_score: float = min(max(data["fuzzy_score"], 0.0), 1.0)
-        s_score: float = min(max(id_to_semantic.get(p_id, 0.0), 0.0), 1.0)
+        f_score_raw = max(data["fuzzy_score"], 0.0)
+        s_score_raw = max(data["semantic_score"], 0.0)
 
-        e_score: float = _calculate_exact_score(cleaned_query, product)
-        p_score: float = _calculate_partial_score(cleaned_query, product)
+        # Calculate exact and partial scores using the search text
+        e_score = _calculate_exact_score(search_text, product)
+        p_score = _calculate_partial_score(search_text, product)
 
-        # Final weighted score combination (unchanged formula)
+        # Min-max normalize fuzzy and semantic within candidate set
+        f_score_norm = _normalize(f_score_raw, fuzzy_min, fuzzy_max)
+        s_score_norm = _normalize(s_score_raw, semantic_min, semantic_max)
+
+        # Brand & Category Matches
+        brand_match = (
+            any(b.lower() == (product.brand or "").lower() for b in parsed.detected_brands)
+            if parsed.detected_brands
+            else False
+        )
+        category_match = (
+            (product.category or "").lower() == (parsed.detected_category_anchor or "").lower()
+            if parsed.detected_category_anchor
+            else False
+        )
+
+        # Soft preference score
+        pref_score = _calculate_preference_score(
+            parsed, product, min_cand_price, max_cand_price
+        )
+
+        # Base weighted score (§6)
         final_score = (
             (e_score * EXACT_WEIGHT) +
             (p_score * PARTIAL_WEIGHT) +
-            (f_score * FUZZY_WEIGHT) +
-            (s_score * SEMANTIC_WEIGHT)
+            (f_score_norm * FUZZY_WEIGHT) +
+            (s_score_norm * SEMANTIC_WEIGHT)
         )
 
-        # Generic False-Positive Protection:
-        # Require strong lexical signal (exact > 0, partial > 0, or fuzzy >= 0.30)
-        # to qualify for the relaxed min_final_score (0.10) threshold.
-        # Candidates supported solely by weak fuzzy noise or pure low semantic similarity
-        # require the higher 0.15 threshold to eliminate false positive candidates.
-        has_strong_lexical_signal = (e_score > 0) or (p_score > 0) or (f_score >= 0.30)
-        effective_threshold = min_final_score if has_strong_lexical_signal else 0.15
+        # Add bonuses
+        if brand_match:
+            final_score += BRAND_MATCH_BONUS
+        if category_match:
+            final_score += CONCEPT_MATCH_BONUS
+        if pref_score > 0:
+            final_score += pref_score * PREFERENCE_BOOST
+
+        final_score = min(max(final_score, 0.0), 1.0)
+
+        # Generic False-Positive Protection
+        has_strong_signal = (
+            (e_score > 0) or (p_score > 0) or
+            (f_score_raw >= STRONG_SIGNAL_FUZZY_MIN) or
+            (s_score_raw >= STRONG_SIGNAL_SEMANTIC_MIN) or
+            brand_match
+        )
+        effective_threshold = min_final_score if has_strong_signal else MIN_FINAL_SCORE_WEAK
 
         if final_score < effective_threshold:
             continue
@@ -367,21 +598,27 @@ def search_products(
                 product=product,
                 exact_score=e_score,
                 partial_score=p_score,
-                fuzzy_score=f_score,
-                semantic_score=s_score,
+                fuzzy_score=f_score_raw,
+                semantic_score=s_score_raw,
                 final_score=final_score,
+                brand_match=brand_match,
+                category_match=category_match,
+                preference_score=pref_score,
+                candidate_sources=sorted(list(data["sources"])),
             )
         )
 
-    # 7. Deterministic sorting by final_score DESC with tie-breakers
+    # ===================================================================
+    # 7. Deterministic Sort — stable tie-break (§6)
+    # ===================================================================
     ranked_results.sort(
         key=lambda r: (
             r.final_score,
             r.semantic_score,
             r.fuzzy_score,
-            -r.product.id,
+            -r.product.id,  # stable tie-break by product_id
         ),
         reverse=True,
     )
 
-    return ranked_results[:limit]
+    return ranked_results[:limit], parsed

@@ -1,47 +1,59 @@
 """
-Offline Product Embeddings Generation Script
+Offline Product Embeddings Generation using ChromaDB.
 
 This script:
-1. Fetches all products from PostgreSQL in batches.
-2. Constructs a rich textual representation for each product (combining product_name, brand, category, tags, and description).
-3. Uses FastEmbed (all-MiniLM-L6-v2) to compute normalized 384-dim vector embeddings.
-4. Saves product embeddings (float32) and product IDs (int64) into numpy binary files:
-   - backend/data/embeddings/product_embeddings.npy (shape: N, 384)
-   - backend/data/embeddings/product_ids.npy        (shape: N,)
-5. Ensures exact 1:1 index alignment between product IDs and vector embedding rows.
+1. Fetches products from PostgreSQL in batches.
+2. Builds rich product text.
+3. Generates 384-dimensional embeddings using local FastEmbed.
+4. Stores embeddings directly in persistent ChromaDB.
+5. Stores product metadata alongside each vector.
+
+No .npy files are created.
 """
 
-import json
 import sys
 import time
 from pathlib import Path
 
-# Ensure backend root directory is in sys.path for app imports
+# Ensure backend root is available for imports
 SCRIPT_DIR = Path(__file__).resolve().parent
 BACKEND_DIR = SCRIPT_DIR.parent
+
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-import numpy as np
+import chromadb
 from fastembed import TextEmbedding
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
 from app.models.product import Product
-from app.services.semantic_search import (
-    EMBEDDING_DIMENSION,
-    EMBEDDINGS_DIR,
-    EMBEDDINGS_FILE,
-    MODEL_DIR,
-    MODEL_NAME,
-    PRODUCT_IDS_FILE,
-)
+
+
+# ---------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------
+
+MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+
+EMBEDDING_DIMENSION = 384
 
 BATCH_SIZE = 256
 
+CHROMA_DIR = BACKEND_DIR / "data" / "chroma"
+
+COLLECTION_NAME = "products"
+
+
+# ---------------------------------------------------------
+# Product Text
+# ---------------------------------------------------------
 
 def build_product_text(product: Product) -> str:
-    """Build a rich, structured textual representation of a product for semantic embedding."""
+    """
+    Build rich searchable text for semantic embedding.
+    """
+
     parts = []
 
     if product.product_name:
@@ -55,7 +67,9 @@ def build_product_text(product: Product) -> str:
 
     if product.tags:
         if isinstance(product.tags, list):
-            parts.append(f"Tags: {', '.join(product.tags)}")
+            parts.append(
+                f"Tags: {', '.join(str(tag) for tag in product.tags)}"
+            )
         else:
             parts.append(f"Tags: {product.tags}")
 
@@ -65,49 +79,101 @@ def build_product_text(product: Product) -> str:
     return " | ".join(parts)
 
 
+# ---------------------------------------------------------
+# Main Generation
+# ---------------------------------------------------------
+
 def generate_embeddings():
-    """Batch load products, compute embeddings using FastEmbed, and save to NumPy .npy files."""
+
     start_time = time.time()
 
-    # Ensure output directories exist
-    EMBEDDINGS_DIR.mkdir(parents=True, exist_ok=True)
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    CHROMA_DIR.mkdir(parents=True, exist_ok=True)
 
     print("=" * 80)
-    print("NORTHSTAR PRODUCT SEARCH — LOCAL EMBEDDING GENERATION")
+    print("NORTHSTAR PRODUCT SEARCH — CHROMADB EMBEDDING GENERATION")
     print("=" * 80)
-    print(f"Model:               {MODEL_NAME}")
+
+    print(f"Model:              {MODEL_NAME}")
     print(f"Embedding Dimension: {EMBEDDING_DIMENSION}")
-    print(f"Model Cache Dir:     {MODEL_DIR}")
-    print(f"Embeddings Out Dir:  {EMBEDDINGS_DIR}")
+    print(f"ChromaDB Directory: {CHROMA_DIR}")
+    print(f"Batch Size:         {BATCH_SIZE}")
     print("-" * 80)
 
-    # Initialize local FastEmbed model
-    print("\nLoading FastEmbed model...")
+    # -----------------------------------------------------
+    # Load local embedding model
+    # -----------------------------------------------------
+
+    print("\nLoading local FastEmbed model...")
+
     model = TextEmbedding(
         model_name=MODEL_NAME,
-        cache_dir=str(MODEL_DIR),
+        cache_dir=str(BACKEND_DIR / "models"),
     )
-    print("Model successfully loaded.\n")
+
+    print("Model successfully loaded.")
+
+    # -----------------------------------------------------
+    # Initialize ChromaDB
+    # -----------------------------------------------------
+
+    print("\nInitializing ChromaDB...")
+
+    chroma_client = chromadb.PersistentClient(
+        path=str(CHROMA_DIR)
+    )
+
+    # Delete old collection if it exists.
+    # This guarantees a completely fresh embedding index.
+    try:
+        chroma_client.delete_collection(
+            name=COLLECTION_NAME
+        )
+
+        print(f"Deleted existing collection: {COLLECTION_NAME}")
+
+    except Exception:
+        print("No existing collection found.")
+
+    collection = chroma_client.create_collection(
+        name=COLLECTION_NAME,
+        metadata={
+            "description": "Offline product semantic embeddings",
+            "embedding_model": MODEL_NAME,
+            "embedding_dimension": EMBEDDING_DIMENSION,
+        },
+    )
+
+    print(f"Created collection: {COLLECTION_NAME}")
+
+    # -----------------------------------------------------
+    # Database
+    # -----------------------------------------------------
 
     db: Session = SessionLocal()
 
     try:
-        # Fetch total product count
+
         total_products = db.query(Product).count()
+
         if total_products == 0:
-            print("[WARNING] No products found in the database.")
+            print("\n[WARNING] No products found in PostgreSQL.")
             return
 
-        print(f"Processing {total_products} products in batches of {BATCH_SIZE}...")
+        print(
+            f"\nProcessing {total_products} products "
+            f"in batches of {BATCH_SIZE}..."
+        )
 
-        all_product_ids = []
-        all_embeddings = []
         processed_count = 0
 
-        # Query products in ordered batches by ID for reproducible, stable indexing
         offset = 0
+
+        # -------------------------------------------------
+        # Process products
+        # -------------------------------------------------
+
         while offset < total_products:
+
             batch_products = (
                 db.query(Product)
                 .order_by(Product.id.asc())
@@ -119,64 +185,142 @@ def generate_embeddings():
             if not batch_products:
                 break
 
-            batch_ids = [p.id for p in batch_products]
-            batch_texts = [build_product_text(p) for p in batch_products]
+            batch_ids = [
+                str(product.id)
+                for product in batch_products
+            ]
 
-            # Generate embeddings for current batch using FastEmbed
-            batch_vectors = list(model.embed(batch_texts))
+            batch_texts = [
+                build_product_text(product)
+                for product in batch_products
+            ]
 
-            all_product_ids.extend(batch_ids)
-            all_embeddings.extend(batch_vectors)
+            # Generate embeddings
+            batch_vectors = list(
+                model.embed(batch_texts)
+            )
+
+            # Convert embeddings to normal Python lists
+            batch_embeddings = [
+                vector.tolist()
+                for vector in batch_vectors
+            ]
+
+            # Metadata
+            batch_metadata = []
+
+            for product in batch_products:
+
+                metadata = {
+                    "product_id": int(product.id),
+                    "product_name": str(
+                        product.product_name or ""
+                    ),
+                    "brand": str(
+                        product.brand or ""
+                    ),
+                    "category": str(
+                        product.category or ""
+                    ),
+                    "price": float(
+                        product.price or 0
+                    ),
+                }
+
+                batch_metadata.append(metadata)
+
+            # -------------------------------------------------
+            # Store in ChromaDB
+            # -------------------------------------------------
+
+            collection.add(
+                ids=batch_ids,
+                embeddings=batch_embeddings,
+                documents=batch_texts,
+                metadatas=batch_metadata,
+            )
 
             processed_count += len(batch_products)
+
             offset += BATCH_SIZE
 
-            progress_pct = (processed_count / total_products) * 100
-            print(f"  Processed {processed_count}/{total_products} products ({progress_pct:.1f}%)...")
+            progress = (
+                processed_count / total_products
+            ) * 100
 
-        # Convert lists to NumPy arrays with specified memory-efficient dtypes
-        embeddings_matrix = np.array(all_embeddings, dtype=np.float32)
-        product_ids_array = np.array(all_product_ids, dtype=np.int64)
+            print(
+                f"  Processed "
+                f"{processed_count}/{total_products} "
+                f"({progress:.1f}%)"
+            )
 
-        # Save to disk as .npy binary files (overwrites existing files cleanly)
-        np.save(EMBEDDINGS_FILE, embeddings_matrix)
-        np.save(PRODUCT_IDS_FILE, product_ids_array)
+        # -------------------------------------------------
+        # Verification
+        # -------------------------------------------------
+
+        total_vectors = collection.count()
 
         elapsed_time = time.time() - start_time
 
-        # Save timing and count metadata to JSON for benchmark auditing
-        info_file = EMBEDDINGS_DIR / "generation_info.json"
-        try:
-            with open(info_file, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "total_products": processed_count,
-                        "elapsed_time_seconds": round(elapsed_time, 2),
-                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    },
-                    f,
-                    indent=2,
-                )
-        except Exception:
-            pass
-
         print("\n" + "=" * 80)
-        print("EMBEDDING GENERATION COMPLETE")
+        print("CHROMADB EMBEDDING GENERATION COMPLETE")
         print("=" * 80)
-        print(f"Total Products Processed: {processed_count}")
-        print(f"Embeddings Matrix Shape:  {embeddings_matrix.shape}")
-        print(f"Product IDs Array Shape: {product_ids_array.shape}")
-        print(f"Saved Embeddings File:   {EMBEDDINGS_FILE}")
-        print(f"Saved Product IDs File:  {PRODUCT_IDS_FILE}")
-        print(f"Total Generation Time:   {elapsed_time:.2f} seconds")
+
+        print(
+            f"Products Processed:  {processed_count}"
+        )
+
+        print(
+            f"Vectors in ChromaDB: {total_vectors}"
+        )
+
+        print(
+            f"Embedding Dimension: {EMBEDDING_DIMENSION}"
+        )
+
+        print(
+            f"Generation Time:     {elapsed_time:.2f}s"
+        )
+
+        print(
+            f"ChromaDB Location:   {CHROMA_DIR}"
+        )
+
         print("=" * 80)
+
+        # -------------------------------------------------
+        # Safety verification
+        # -------------------------------------------------
+
+        if total_vectors != processed_count:
+
+            raise RuntimeError(
+                "CRITICAL: Product count and ChromaDB "
+                "vector count do not match."
+            )
+
+        print("\nSUCCESS:")
+        print(
+            "Every product has a corresponding "
+            "embedding in ChromaDB."
+        )
 
     except Exception as e:
-        print(f"\n[ERROR] Failed to generate embeddings: {e}")
-        raise e
+
+        print(
+            f"\n[ERROR] Embedding generation failed: {e}"
+        )
+
+        raise
+
     finally:
+
         db.close()
 
+
+# ---------------------------------------------------------
+# Entry Point
+# ---------------------------------------------------------
 
 if __name__ == "__main__":
     generate_embeddings()

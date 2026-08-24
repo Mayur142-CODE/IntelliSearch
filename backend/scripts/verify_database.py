@@ -118,29 +118,26 @@ def run_verification():
     except Exception as e:
         add_check("Column Schema", "FAIL", str(e))
 
-    # 6. Embedding files alignment
+    # 6. ChromaDB Vector Store Verification
     try:
-        import numpy as np
-        emb_file = BACKEND_DIR / "data" / "embeddings" / "product_embeddings.npy"
-        ids_file = BACKEND_DIR / "data" / "embeddings" / "product_ids.npy"
-
-        if emb_file.exists() and ids_file.exists():
-            emb = np.load(emb_file)
-            ids = np.load(ids_file)
-            emb_count = emb.shape[0]
-            ids_count = ids.shape[0]
-            aligned = emb_count == ids_count
-            matches_db = emb_count == product_count if 'product_count' in report else False
+        import chromadb
+        chroma_dir = BACKEND_DIR / "data" / "chroma"
+        if chroma_dir.exists():
+            client = chromadb.PersistentClient(path=str(chroma_dir))
+            col = client.get_collection("products")
+            vector_count = col.count()
+            matches_db = vector_count == product_count if 'product_count' in report else False
             add_check(
-                "Embedding Alignment",
-                "PASS" if aligned and matches_db else "FAIL",
-                f"Embeddings: {emb_count}, Product IDs: {ids_count}, DB: {report.get('product_count', '?')}"
-                + (" (aligned)" if aligned and matches_db else " (MISMATCH)"),
+                "ChromaDB Vector Store",
+                "PASS" if matches_db else "FAIL",
+                f"Vectors in ChromaDB: {vector_count}, DB Products: {report.get('product_count', '?')}"
+                + (" (aligned)" if matches_db else " (MISMATCH)"),
             )
+            report["chroma_vector_count"] = vector_count
         else:
-            add_check("Embedding Alignment", "FAIL", "Embedding files not found")
+            add_check("ChromaDB Vector Store", "FAIL", "ChromaDB data directory not found")
     except Exception as e:
-        add_check("Embedding Alignment", "FAIL", str(e))
+        add_check("ChromaDB Vector Store", "FAIL", str(e))
 
     # 7. pg_trgm extension
     try:
