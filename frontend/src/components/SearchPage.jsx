@@ -26,15 +26,18 @@ export function SearchPage() {
   const [open, setOpen] = useState(false);
 
   const [suggestions, setSuggestions] = useState([]);
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
   const [results, setResults] = useState(null);
   const [interpretation, setInterpretation] = useState(null);
   const [status, setStatus] = useState("idle"); // idle | loading | success | error
   const [error, setError] = useState("");
   const [elapsed, setElapsed] = useState(0);
 
-  const debounced = useDebounced(input, 300);
+  const debounced = useDebounced(input, 250);
   const searchAbort = useRef(null);
+  const autocompleteAbort = useRef(null);
 
+  // Committed search: called ONLY when user presses Enter, clicks a suggestion, or clicks an Example chip
   const runSearch = useCallback((query) => {
     const q = (query ?? "").trim();
     if (!q) {
@@ -43,6 +46,7 @@ export function SearchPage() {
       setInterpretation(null);
       setSuggestions([]);
       setStatus("idle");
+      setOpen(false);
       return;
     }
 
@@ -50,6 +54,7 @@ export function SearchPage() {
     setInput(q);
     setStatus("loading");
     setError("");
+    setOpen(false); // Close autocomplete dropdown upon search submission
 
     searchAbort.current?.abort();
     const controller = new AbortController();
@@ -62,7 +67,6 @@ export function SearchPage() {
         setElapsed(performance.now() - started);
         const resList = data?.results ?? [];
         setResults(resList);
-        setSuggestions(resList);
         setInterpretation(data?.interpretation ?? null);
         setStatus("success");
       })
@@ -73,40 +77,41 @@ export function SearchPage() {
       });
   }, []);
 
-  // Debounced search effect with AbortController for stale response prevention
+  const handleClear = useCallback(() => {
+    setInput("");
+    setSubmitted("");
+    setSuggestions([]);
+    setResults(null);
+    setInterpretation(null);
+    setOpen(false);
+    setStatus("idle");
+  }, []);
+
+  // Autocomplete suggestion fetch: triggers while typing to populate dropdown, WITHOUT rendering product results
   useEffect(() => {
     const q = debounced.trim();
     if (!q) {
       setSuggestions([]);
-      setResults(null);
-      setInterpretation(null);
-      setStatus("idle");
+      setSuggestionsLoading(false);
       return;
     }
 
-    searchAbort.current?.abort();
+    autocompleteAbort.current?.abort();
     const controller = new AbortController();
-    searchAbort.current = controller;
-    const started = performance.now();
+    autocompleteAbort.current = controller;
+    setSuggestionsLoading(true);
 
-    setStatus("loading");
-    setSubmitted(q);
-    setError("");
-
-    searchProducts(q, { signal: controller.signal, limit: 12 })
+    searchProducts(q, { signal: controller.signal, limit: 8 })
       .then((data) => {
         if (controller.signal.aborted) return;
-        setElapsed(performance.now() - started);
         const resList = data?.results ?? [];
-        setResults(resList);
         setSuggestions(resList);
-        setInterpretation(data?.interpretation ?? null);
-        setStatus("success");
+        setSuggestionsLoading(false);
       })
       .catch((err) => {
         if (controller.signal.aborted || err?.name === "AbortError") return;
-        setError(err?.message || "Unable to reach the search API.");
-        setStatus("error");
+        setSuggestions([]);
+        setSuggestionsLoading(false);
       });
 
     return () => {
@@ -142,8 +147,9 @@ export function SearchPage() {
           value={input}
           onChange={setInput}
           onSubmit={runSearch}
+          onClear={handleClear}
           suggestions={suggestions}
-          loading={status === "loading"}
+          loading={status === "loading" || suggestionsLoading}
           open={open}
           setOpen={setOpen}
         />

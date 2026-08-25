@@ -5,6 +5,7 @@ export function SearchBar({
   value,
   onChange,
   onSubmit,
+  onClear,
   suggestions = [],
   loading = false,
   open,
@@ -46,7 +47,19 @@ export function SearchBar({
   return (
     <div ref={wrapperRef} className="relative w-full">
       <div className="flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 shadow-sm transition-colors focus-within:border-primary focus-within:ring-2 focus-within:ring-ring/40">
-        <Search className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden="true" />
+        <button
+          type="button"
+          aria-label="Submit search"
+          onClick={() => {
+            if (value.trim()) {
+              onSubmit(value);
+              setOpen(false);
+            }
+          }}
+          className="rounded p-0.5 text-muted-foreground hover:text-primary transition-colors"
+        >
+          <Search className="h-5 w-5 shrink-0" aria-hidden="true" />
+        </button>
         <input
           type="text"
           value={value}
@@ -59,9 +72,11 @@ export function SearchBar({
             onChange(e.target.value);
             setOpen(true);
           }}
-          onFocus={() => setOpen(true)}
+          onFocus={() => {
+            if (value.trim().length > 0) setOpen(true);
+          }}
           onKeyDown={handleKeyDown}
-          placeholder="Search products..."
+          placeholder="Search products (type for autocomplete, press Enter to search)..."
           className="w-full bg-transparent text-base outline-none placeholder:text-muted-foreground"
         />
         {loading && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
@@ -71,6 +86,7 @@ export function SearchBar({
             aria-label="Clear search"
             onClick={() => {
               onChange("");
+              if (onClear) onClear();
               setOpen(false);
             }}
             className="rounded-md p-1 text-muted-foreground hover:bg-muted"

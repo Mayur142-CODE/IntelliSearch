@@ -74,6 +74,7 @@ PRICE_OPERATOR_WORDS: Set[str] = {
     "max", "maximum", "min", "minimum", "up", "least", "most",
 }
 
+6566                                                                               
 
 # ============================================================================
 # §2.1 — ParsedQuery Data Contract (Pydantic)
