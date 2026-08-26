@@ -12,6 +12,10 @@ export function searchProducts(query, { signal, limit = 10 } = {}) {
   return request(`/search?q=${encodeURIComponent(query)}&limit=${limit}`, { signal });
 }
 
+export function fetchSuggestions(query, { signal, limit = 8 } = {}) {
+  return request(`/autocomplete?q=${encodeURIComponent(query)}&limit=${limit}`, { signal });
+}
+
 export function getProduct(id, { signal } = {}) {
   return request(`/api/products/${id}`, { signal });
 }

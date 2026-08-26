@@ -2,9 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { SearchBar } from "./SearchBar";
 import { ProductCard } from "./ProductCard";
 import { LoadingGrid, EmptyState, ErrorState } from "./SearchStates";
-import { searchProducts } from "../lib/api";
+import { searchProducts, fetchSuggestions } from "../lib/api";
 import { useDebounced } from "../lib/useDebounced";
-import { SlidersHorizontal, Sparkles, Tag } from "lucide-react";
+import { Sparkles, Tag } from "lucide-react";
 
 const EXAMPLES = [
   "nike",
@@ -20,42 +20,114 @@ const EXAMPLES = [
   "bag for traveling",
 ];
 
-export function SearchPage() {
-  const [input, setInput] = useState("");
-  const [submitted, setSubmitted] = useState("");
-  const [open, setOpen] = useState(false);
+// Simple bounded LRU-ish cache for autocomplete results
+const suggestionCache = new Map();
+const CACHE_MAX = 50;
 
+function getCached(key) {
+  return suggestionCache.get(key) ?? null;
+}
+
+function setCache(key, value) {
+  if (suggestionCache.size >= CACHE_MAX) {
+    // Delete oldest entry
+    const firstKey = suggestionCache.keys().next().value;
+    suggestionCache.delete(firstKey);
+  }
+  suggestionCache.set(key, value);
+}
+
+export function SearchPage() {
+  // --- Typing state (drives autocomplete only) ---
+  const [searchQuery, setSearchQuery] = useState("");
   const [suggestions, setSuggestions] = useState([]);
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+
+  // --- Submitted state (drives product results) ---
+  const [submittedQuery, setSubmittedQuery] = useState("");
   const [results, setResults] = useState(null);
   const [interpretation, setInterpretation] = useState(null);
-  const [status, setStatus] = useState("idle"); // idle | loading | success | error
-  const [error, setError] = useState("");
+  const [searchStatus, setSearchStatus] = useState("idle"); // idle | loading | success | error
+  const [searchError, setSearchError] = useState("");
   const [elapsed, setElapsed] = useState(0);
 
-  const debounced = useDebounced(input, 250);
-  const searchAbort = useRef(null);
-  const autocompleteAbort = useRef(null);
+  // Debounced typing for autocomplete (fast, 200ms)
+  const debouncedQuery = useDebounced(searchQuery, 200);
 
-  // Committed search: called ONLY when user presses Enter, clicks a suggestion, or clicks an Example chip
-  const runSearch = useCallback((query) => {
-    const q = (query ?? "").trim();
+  // Abort controllers
+  const suggestAbort = useRef(null);
+  const searchAbort = useRef(null);
+
+  // ==================================================================
+  // Autocomplete: fires on debounced typing, NOT product search
+  // ==================================================================
+  useEffect(() => {
+    const q = debouncedQuery.trim();
     if (!q) {
-      setSubmitted("");
-      setResults(null);
-      setInterpretation(null);
       setSuggestions([]);
-      setStatus("idle");
-      setOpen(false);
+      setSuggestionsLoading(false);
       return;
     }
 
-    setSubmitted(q);
-    setInput(q);
-    setStatus("loading");
-    setError("");
-    setOpen(false); // Close autocomplete dropdown upon search submission
+    // Check cache first
+    const cached = getCached(q.toLowerCase());
+    if (cached) {
+      setSuggestions(cached);
+      setSuggestionsLoading(false);
+      return;
+    }
 
+    // Abort previous suggestion request
+    suggestAbort.current?.abort();
+    const controller = new AbortController();
+    suggestAbort.current = controller;
+
+    setSuggestionsLoading(true);
+
+    fetchSuggestions(q, { signal: controller.signal, limit: 8 })
+      .then((data) => {
+        if (controller.signal.aborted) return;
+        const items = data?.suggestions ?? [];
+        setSuggestions(items);
+        setCache(q.toLowerCase(), items);
+        setSuggestionsLoading(false);
+      })
+      .catch((err) => {
+        if (controller.signal.aborted || err?.name === "AbortError") return;
+        setSuggestions([]);
+        setSuggestionsLoading(false);
+      });
+
+    return () => {
+      controller.abort();
+    };
+  }, [debouncedQuery]);
+
+  // ==================================================================
+  // Product Search: fires ONLY on explicit submission
+  // ==================================================================
+  const runSearch = useCallback((query) => {
+    const q = (query ?? "").trim();
+
+    // Handle clear
+    if (!q) {
+      setSubmittedQuery("");
+      setResults(null);
+      setInterpretation(null);
+      setSuggestions([]);
+      setSearchStatus("idle");
+      setSearchQuery("");
+      return;
+    }
+
+    setSubmittedQuery(q);
+    setSearchQuery(q);
+    setSearchStatus("loading");
+    setSearchError("");
+    setShowSuggestions(false);
+
+    // Abort previous search
     searchAbort.current?.abort();
     const controller = new AbortController();
     searchAbort.current = controller;
@@ -68,56 +140,14 @@ export function SearchPage() {
         const resList = data?.results ?? [];
         setResults(resList);
         setInterpretation(data?.interpretation ?? null);
-        setStatus("success");
+        setSearchStatus("success");
       })
       .catch((err) => {
         if (controller.signal.aborted || err?.name === "AbortError") return;
-        setError(err?.message || "Unable to reach the search API.");
-        setStatus("error");
+        setSearchError(err?.message || "Unable to reach the search API.");
+        setSearchStatus("error");
       });
   }, []);
-
-  const handleClear = useCallback(() => {
-    setInput("");
-    setSubmitted("");
-    setSuggestions([]);
-    setResults(null);
-    setInterpretation(null);
-    setOpen(false);
-    setStatus("idle");
-  }, []);
-
-  // Autocomplete suggestion fetch: triggers while typing to populate dropdown, WITHOUT rendering product results
-  useEffect(() => {
-    const q = debounced.trim();
-    if (!q) {
-      setSuggestions([]);
-      setSuggestionsLoading(false);
-      return;
-    }
-
-    autocompleteAbort.current?.abort();
-    const controller = new AbortController();
-    autocompleteAbort.current = controller;
-    setSuggestionsLoading(true);
-
-    searchProducts(q, { signal: controller.signal, limit: 8 })
-      .then((data) => {
-        if (controller.signal.aborted) return;
-        const resList = data?.results ?? [];
-        setSuggestions(resList);
-        setSuggestionsLoading(false);
-      })
-      .catch((err) => {
-        if (controller.signal.aborted || err?.name === "AbortError") return;
-        setSuggestions([]);
-        setSuggestionsLoading(false);
-      });
-
-    return () => {
-      controller.abort();
-    };
-  }, [debounced]);
 
   const hasInterpretation = interpretation && (
     interpretation.detected_brands?.length > 0 ||
@@ -144,14 +174,13 @@ export function SearchPage() {
 
       <section className="mx-auto max-w-3xl px-4 pb-2 pt-10">
         <SearchBar
-          value={input}
-          onChange={setInput}
+          value={searchQuery}
+          onChange={setSearchQuery}
           onSubmit={runSearch}
-          onClear={handleClear}
           suggestions={suggestions}
-          loading={status === "loading" || suggestionsLoading}
-          open={open}
-          setOpen={setOpen}
+          suggestionsLoading={suggestionsLoading}
+          open={showSuggestions}
+          setOpen={setShowSuggestions}
         />
 
         {/* Dynamic Query Interpretation Badge Strip */}
@@ -201,26 +230,26 @@ export function SearchPage() {
       </section>
 
       <section className="mx-auto max-w-6xl px-4 pb-20 pt-8">
-        {status === "loading" && <LoadingGrid />}
+        {searchStatus === "loading" && <LoadingGrid />}
 
-        {status === "error" && (
-          <ErrorState message={error} onRetry={() => runSearch(submitted)} />
+        {searchStatus === "error" && (
+          <ErrorState message={searchError} onRetry={() => runSearch(submittedQuery)} />
         )}
 
-        {status === "success" && (
+        {searchStatus === "success" && (
           <>
             <div className="mb-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 text-sm text-muted-foreground">
               <div className="flex items-center gap-x-4">
-                <span className="font-medium text-foreground">“{submitted}”</span>
+                <span className="font-medium text-foreground">"{submittedQuery}"</span>
                 <span>{results.length} results</span>
                 <span>{elapsed.toFixed(0)} ms</span>
               </div>
               <div className="text-xs text-muted-foreground">
-                Hybrid Vector Retrieval & Reranking
+                Hybrid Vector Retrieval &amp; Reranking
               </div>
             </div>
             {results.length === 0 ? (
-              <EmptyState query={submitted} />
+              <EmptyState query={submittedQuery} />
             ) : (
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                 {results.map((p) => (
@@ -231,9 +260,9 @@ export function SearchPage() {
           </>
         )}
 
-        {status === "idle" && (
+        {searchStatus === "idle" && (
           <p className="py-16 text-center text-sm text-muted-foreground">
-            Start typing to search 7,500 products using the dynamic ChromaDB hybrid engine.
+            Start typing to see suggestions, then press Enter to search 7,500 products.
           </p>
         )}
       </section>

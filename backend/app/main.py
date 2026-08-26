@@ -4,7 +4,7 @@ import time
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import search_router
+from app.api import search_router, autocomplete_router
 from app.core.database import SessionLocal, engine
 from app.services.query_parser import CatalogVocabulary
 
@@ -66,6 +66,7 @@ app.add_middleware(
 )
 
 app.include_router(search_router)
+app.include_router(autocomplete_router)
 
 
 @app.get("/")
