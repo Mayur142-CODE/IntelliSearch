@@ -55,16 +55,17 @@ export function SearchPage() {
   // Debounced typing for autocomplete (fast, 200ms)
   const debouncedQuery = useDebounced(searchQuery, 200);
 
-  // Abort controllers
+  // Abort controllers & request sequence tracker
   const suggestAbort = useRef(null);
   const searchAbort = useRef(null);
+  const suggestSeqRef = useRef(0);
 
   // ==================================================================
   // Autocomplete: fires on debounced typing, NOT product search
   // ==================================================================
   useEffect(() => {
     const q = debouncedQuery.trim();
-    if (!q) {
+    if (!q || q.length < 2) {
       setSuggestions([]);
       setSuggestionsLoading(false);
       return;
@@ -78,23 +79,24 @@ export function SearchPage() {
       return;
     }
 
-    // Abort previous suggestion request
+    // Abort previous suggestion request and track sequence
     suggestAbort.current?.abort();
     const controller = new AbortController();
     suggestAbort.current = controller;
+    const currentSeq = ++suggestSeqRef.current;
 
     setSuggestionsLoading(true);
 
     fetchSuggestions(q, { signal: controller.signal, limit: 8 })
       .then((data) => {
-        if (controller.signal.aborted) return;
+        if (currentSeq !== suggestSeqRef.current || controller.signal.aborted) return;
         const items = data?.suggestions ?? [];
         setSuggestions(items);
         setCache(q.toLowerCase(), items);
         setSuggestionsLoading(false);
       })
       .catch((err) => {
-        if (controller.signal.aborted || err?.name === "AbortError") return;
+        if (currentSeq !== suggestSeqRef.current || controller.signal.aborted || err?.name === "AbortError") return;
         setSuggestions([]);
         setSuggestionsLoading(false);
       });

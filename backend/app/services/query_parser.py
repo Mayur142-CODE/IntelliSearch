@@ -289,6 +289,27 @@ class CatalogVocabulary:
 
         self._is_loaded = True
 
+    def is_valid_word(self, token: str) -> bool:
+        """Check if a word/token is a recognized valid catalog entity or stopword."""
+        lower = token.lower().strip()
+        if not lower:
+            return False
+        if lower in STOP_WORDS or lower in self.brand_lower_map or lower in self.category_lower_map:
+            return True
+        for entry in self.brand_vocab:
+            if entry.token == lower:
+                return True
+        for entry in self.category_vocab:
+            if entry.token == lower:
+                return True
+        for entry in self.product_name_vocab:
+            if entry.token == lower:
+                return True
+        for entry in self.tag_vocab:
+            if entry.token == lower:
+                return True
+        return False
+
     @staticmethod
     def _tokenize_field(text: str) -> List[str]:
         """Extract word tokens from a field value."""
@@ -318,7 +339,8 @@ class CatalogVocabulary:
             for token in self._tokenize_field(canonical):
                 if token not in seen_tokens and token not in STOP_WORDS:
                     seen_tokens.add(token)
-                    entries.append(_FieldVocabEntry(token, canonical, field, freq.get(token, 1)))
+                    token_canon = canonical if token == lower_canonical else token
+                    entries.append(_FieldVocabEntry(token, token_canon, field, freq.get(token, 1)))
 
         return entries
 
@@ -379,6 +401,8 @@ class CatalogVocabulary:
 
         # Collect candidates from all field vocabs
         tok_soundex = _soundex(lower_tok)
+        col_tok = re.sub(r'(.)\1+', r'\1', lower_tok)
+        col_soundex = _soundex(col_tok)
         candidates: List[TokenCorrection] = []
 
         # Search each field vocabulary separately
@@ -393,21 +417,29 @@ class CatalogVocabulary:
                 if len(entry.token) < 3 and tok_len >= 3:
                     continue
 
-                # Compute edit distance
-                dist = distance.Levenshtein.distance(lower_tok, entry.token)
+                # Compute edit distance on both raw and repeat-collapsed token (handles transpositions)
+                dist_raw = distance.DamerauLevenshtein.distance(lower_tok, entry.token)
+                dist_col = distance.DamerauLevenshtein.distance(col_tok, entry.token)
+                dist = min(dist_raw, dist_col)
 
                 # Determine max distance based on token length
                 max_dist = MAX_EDIT_DISTANCE_SHORT if tok_len <= 4 else MAX_EDIT_DISTANCE_LONG
 
                 # Phonetic match check (independent of Levenshtein)
-                phonetic_match = (entry.soundex == tok_soundex) and len(lower_tok) >= 3
+                phonetic_match = (entry.soundex == tok_soundex or entry.soundex == col_soundex) and len(lower_tok) >= 3
 
                 # Candidate passes if within Levenshtein threshold OR has phonetic match
                 if dist <= max_dist or (phonetic_match and dist <= MAX_EDIT_DISTANCE_PHONETIC):
-                    # Use max(fuzz.ratio, JaroWinkler) for better length-mismatch handling (§3.2)
-                    ratio_sim = fuzz.ratio(lower_tok, entry.token) / 100.0
-                    jw_sim = distance.JaroWinkler.similarity(lower_tok, entry.token)
-                    similarity = max(ratio_sim, jw_sim)
+                    ratio_raw = fuzz.ratio(lower_tok, entry.token) / 100.0
+                    ratio_col = fuzz.ratio(col_tok, entry.token) / 100.0
+                    ratio_sim = max(ratio_raw, ratio_col)
+
+                    jw_raw = distance.JaroWinkler.similarity(lower_tok, entry.token)
+                    jw_col = distance.JaroWinkler.similarity(col_tok, entry.token)
+                    jw_sim = max(jw_raw, jw_col)
+
+                    lev_sim = 1.0 - (float(dist) / max(tok_len, len(entry.token)))
+                    similarity = (0.40 * lev_sim) + (0.30 * ratio_sim) + (0.30 * jw_sim)
 
                     # Compute confidence (§3.3)
                     freq_score = math.log1p(entry.count) / math.log1p(self.max_frequency) if self.max_frequency > 0 else 0.0
@@ -519,7 +551,7 @@ class CatalogVocabulary:
                         best_brand = canonical
             else:
                 # Longer brands (>= 5 chars, e.g. "Adidas", "Samsung", "Logitech")
-                if (dist <= 1 and eff_similarity >= 75.0) or (dist <= 2 and eff_similarity >= 85.0):
+                if (dist <= 1 and eff_similarity >= 75.0) or (dist <= 2 and ratio >= 75.0 and eff_similarity >= 85.0):
                     if not is_single_token_query and len(q) <= 4 and dist > 0:
                         continue
                     if eff_similarity > best_score:

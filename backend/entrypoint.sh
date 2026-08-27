@@ -38,6 +38,5 @@ alembic upgrade head
 echo "[3/4] Checking and importing product dataset..."
 python scripts/import_products.py
 
-# 4. Start Uvicorn ASGI server
-echo "[4/4] Starting FastAPI Uvicorn server on 0.0.0.0:8000..."
-exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+echo "[4/4] Starting FastAPI Uvicorn server on 0.0.0.0:8000 (with --reload)..."
+exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload

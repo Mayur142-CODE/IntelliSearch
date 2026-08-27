@@ -38,8 +38,8 @@ FIELD_PRIORITY_BONUS = {
 # token length 3–4: min confidence ≥ 0.88
 # token length ≥ 5: min confidence ≥ 0.80
 
-MIN_CONFIDENCE_SHORT: float = 0.88   # For tokens 3-4 chars
-MIN_CONFIDENCE_LONG: float = 0.80    # For tokens ≥ 5 chars
+MIN_CONFIDENCE_SHORT: float = 0.75   # For tokens 3-4 chars
+MIN_CONFIDENCE_LONG: float = 0.70    # For tokens ≥ 5 chars
 
 # ============================================================================
 # §3.5 — Multi-Candidate Margin

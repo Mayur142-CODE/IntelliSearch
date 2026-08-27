@@ -23,7 +23,13 @@ Architecture & Pipeline Design:
    - Category anchor hard-filter for explicit product queries.
 
 6. Hybrid Ranking (§6):
-   - Min-max normalize each signal within current candidate set.
+   - Fuzzy (pg_trgm) and semantic (cosine) scores are already bounded [0, 1]
+     absolute similarity measures and are used AS-IS — they are NOT re-scaled
+     against the current candidate set. (Fixed 2026-08: per-query min-max
+     normalization previously let the "best of a weak pool" masquerade as a
+     strong match, and compressed genuinely relevant candidates toward 0 in
+     pools with one dominant match, causing both false positives and
+     incorrectly dropped results.)
    - Named constants from search_config.py.
    - Stable tie-break: final_score DESC, semantic DESC, fuzzy DESC, product_id ASC.
 
@@ -516,21 +522,15 @@ def search_products(
     # 6. Multi-Signal Scoring & Reranking (§6)
     # ===================================================================
 
-    # Collect raw scores for min-max normalization
-    raw_fuzzy_scores = [d["fuzzy_score"] for d in verified_candidates.values()]
-    raw_semantic_scores = [d["semantic_score"] for d in verified_candidates.values()]
-
-    fuzzy_min = min(raw_fuzzy_scores) if raw_fuzzy_scores else 0.0
-    fuzzy_max = max(raw_fuzzy_scores) if raw_fuzzy_scores else 1.0
-    semantic_min = min(raw_semantic_scores) if raw_semantic_scores else 0.0
-    semantic_max = max(raw_semantic_scores) if raw_semantic_scores else 1.0
-
-    def _normalize(val: float, vmin: float, vmax: float) -> float:
-        """Min-max normalize to [0, 1] within current candidate set."""
-        if vmax <= vmin:
-            return 0.5 if val > 0 else 0.0
-        return (val - vmin) / (vmax - vmin)
-
+    # NOTE: fuzzy_score (pg_trgm similarity) and semantic_score (cosine similarity)
+    # are ALREADY absolute, bounded [0, 1] similarity measures. We intentionally do
+    # NOT min-max normalize them against the current candidate set — doing so was
+    # the root cause of bad ranking: a per-query pool of only weak matches would
+    # stretch its best (still-weak) candidate up to 1.0, letting irrelevant
+    # products masquerade as strong matches, while genuinely relevant candidates
+    # in a pool with one dominant match would get compressed toward 0 and
+    # incorrectly dropped by the MIN_FINAL_SCORE threshold. Raw scores keep the
+    # STRONG_SIGNAL_* gating and the weighted sum meaningful in absolute terms.
     ranked_results: List[CombinedSearchResult] = []
 
     for p_id, data in verified_candidates.items():
@@ -541,10 +541,6 @@ def search_products(
         # Calculate exact and partial scores using the search text
         e_score = _calculate_exact_score(search_text, product)
         p_score = _calculate_partial_score(search_text, product)
-
-        # Min-max normalize fuzzy and semantic within candidate set
-        f_score_norm = _normalize(f_score_raw, fuzzy_min, fuzzy_max)
-        s_score_norm = _normalize(s_score_raw, semantic_min, semantic_max)
 
         # Brand & Category Matches
         brand_match = (
@@ -567,8 +563,8 @@ def search_products(
         final_score = (
             (e_score * EXACT_WEIGHT) +
             (p_score * PARTIAL_WEIGHT) +
-            (f_score_norm * FUZZY_WEIGHT) +
-            (s_score_norm * SEMANTIC_WEIGHT)
+            (f_score_raw * FUZZY_WEIGHT) +
+            (s_score_raw * SEMANTIC_WEIGHT)
         )
 
         # Add bonuses

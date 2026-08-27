@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="NorthStar Product Search API",
-    version="1.0.0",
+    version="1.1.0",
 )
 
 

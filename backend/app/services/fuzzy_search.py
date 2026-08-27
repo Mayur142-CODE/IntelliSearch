@@ -110,12 +110,20 @@ def _fuzzy_score_sql(tokens: List[str], query: str, alias: str = "p") -> str:
 
 def _build_gin_conditions(tokens: List[str]) -> List[str]:
     """
-    Build GIN-indexed % operator conditions for tokens >= 3 characters.
+    Build GIN-indexed % operator conditions for tokens >= 2 characters.
     Searches product_name and brand (both have GIN trigram indexes).
+
+    NOTE: previously gated at >= 3 characters, which meant queries made
+    entirely of short tokens (e.g. "hp", "tv", "3m") produced zero GIN
+    conditions and short-circuited the whole fuzzy path to an empty
+    result set (see fuzzy_search_products: `if not gin_conds: return []`).
+    Lowered to >= 2 so short brand/model tokens still get fuzzy candidates.
+    Single-character tokens are still excluded — trigram similarity is not
+    meaningful below 2 characters.
     """
     conditions = []
     for t in tokens:
-        if len(t) >= 3:
+        if len(t) >= 2:
             st = _safe(t)
             conditions.append(f"product_name % '{st}'")
             conditions.append(f"brand % '{st}'")
@@ -126,10 +134,14 @@ def _build_ws_conditions(tokens: List[str], threshold: float = 0.35) -> List[str
     """
     Build strict_word_similarity conditions for fallback path.
     Searches product_name, brand, and category.
+
+    Gate lowered from >= 3 to >= 2 characters to match _build_gin_conditions
+    (see note there) so this fallback path can still fire for short-token
+    queries instead of also returning nothing.
     """
     conditions = []
     for t in tokens:
-        if len(t) >= 3:
+        if len(t) >= 2:
             st = _safe(t)
             conditions.append(f"strict_word_similarity('{st}', product_name) >= {threshold}")
             conditions.append(f"strict_word_similarity('{st}', brand) >= {threshold}")

@@ -1,29 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { Search, X, Loader2, Sparkles, Tag, DollarSign, Box, ArrowRight } from "lucide-react";
+import { Search, X, Loader2 } from "lucide-react";
 
-const TYPE_CONFIG = {
-  brand:      { icon: Sparkles,   label: "Brand",      className: "text-violet-500" },
-  category:   { icon: Tag,        label: "Category",   className: "text-blue-500" },
-  product:    { icon: Box,        label: "Product",    className: "text-emerald-500" },
-  correction: { icon: ArrowRight, label: "Did you mean", className: "text-amber-500" },
-  price:      { icon: DollarSign, label: "Price",      className: "text-green-500" },
-  phrase:     { icon: Search,     label: "Search",     className: "text-muted-foreground" },
-};
 
-function SuggestionIcon({ type }) {
-  const config = TYPE_CONFIG[type] || TYPE_CONFIG.phrase;
-  const Icon = config.icon;
-  return <Icon className={`h-3.5 w-3.5 shrink-0 ${config.className}`} aria-hidden="true" />;
-}
-
-function SuggestionBadge({ type }) {
-  const config = TYPE_CONFIG[type] || TYPE_CONFIG.phrase;
-  return (
-    <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium tracking-wide uppercase bg-muted/60 ${config.className}`}>
-      {config.label}
-    </span>
-  );
-}
 
 export function SearchBar({
   value,
@@ -178,9 +156,15 @@ export function SearchBar({
                     : "text-foreground hover:bg-muted/50"
                 }`}
               >
-                <SuggestionIcon type={s.type} />
-                <span className="flex-1 truncate">{s.text}</span>
-                <SuggestionBadge type={s.type} />
+                <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+                {s.is_correction ? (
+                  <div className="flex flex-col">
+                    <span className="text-[11px] font-medium text-muted-foreground">Did you mean:</span>
+                    <span className="font-medium text-foreground">{s.text}</span>
+                  </div>
+                ) : (
+                  <span className="flex-1 truncate font-normal">{s.text}</span>
+                )}
               </button>
             </li>
           ))}

@@ -31,6 +31,8 @@ services:
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
       PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./backend:/app
     ports:
       - "8000:8000"
     depends_on:
@@ -53,8 +55,12 @@ services:
         VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
     container_name: northstar-frontend
     restart: unless-stopped
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
     ports:
       - "3000:3000"
+    command: npm run dev -- --host 0.0.0.0
     depends_on:
       backend:
         condition: service_healthy

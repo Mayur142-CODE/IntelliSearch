@@ -3,7 +3,7 @@ Autocomplete API Endpoint
 
 GET /autocomplete?q=<partial_query>
 
-Returns dynamic suggestions from the CatalogVocabulary singleton
+Returns complete-query dynamic suggestions from the CatalogVocabulary singleton
 and PostgreSQL product catalog. No hardcoded brands, categories,
 or price values.
 """
@@ -22,7 +22,8 @@ router = APIRouter(tags=["Autocomplete"])
 
 class SuggestionItem(BaseModel):
     text: str
-    type: str
+    type: str = "phrase"
+    is_correction: bool = False
 
 
 class AutocompleteResponse(BaseModel):
@@ -44,7 +45,11 @@ def autocomplete_endpoint(
     raw_suggestions = generate_suggestions(db=db, query=cleaned, max_results=limit)
 
     suggestions = [
-        SuggestionItem(text=s.text, type=s.type)
+        SuggestionItem(
+            text=s.text,
+            type=s.type,
+            is_correction=s.is_correction,
+        )
         for s in raw_suggestions
     ]
 
