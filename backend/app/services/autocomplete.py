@@ -626,6 +626,7 @@ def generate_suggestions(
     raw_tokens = [t for t in lower_q.split() if t]
     norm_tokens = [t for t in norm_query.lower().split() if t]
 
+    # pyrefly: ignore [bad-unpacking]
     for key, (cand_text, cand_type, sem_score, is_corr) in candidates_dict.items():
         c_lower = cand_text.lower()
         cand_tokens = [t for t in c_lower.split() if t]
