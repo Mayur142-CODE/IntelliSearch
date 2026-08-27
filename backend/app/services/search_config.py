@@ -16,18 +16,17 @@ Nothing here is keyed by a literal query string, brand name, or product name.
 #            + W_FREQ * log1p(catalog_frequency) / log1p(max_catalog_frequency)
 #            + W_FIELD_PRIORITY * field_priority_bonus
 
-W_SIM: float = 0.65           # Weight for normalized RapidFuzz similarity score
-W_FREQ: float = 0.15          # Weight for log-normalized catalog frequency
-W_FIELD_PRIORITY: float = 0.20  # Weight for field-type priority bonus
+W_SIM: float = 0.80           # Weight for normalized RapidFuzz/Levenshtein similarity score
+W_FREQ: float = 0.10          # Weight for log-normalized catalog frequency
+W_FIELD_PRIORITY: float = 0.10  # Weight for field-type priority bonus (tie-breaker)
 
 # Field priority order (higher = more trusted for correction)
-# brand > category > product-name token > tag > description text
 FIELD_PRIORITY_BONUS = {
     "brand": 1.0,
-    "category": 0.80,
-    "product_name": 0.60,
-    "tag": 0.40,
-    "description": 0.20,
+    "category": 0.90,
+    "product_name": 0.80,
+    "tag": 0.70,
+    "description": 0.50,
 }
 
 # ============================================================================
@@ -35,8 +34,8 @@ FIELD_PRIORITY_BONUS = {
 # ============================================================================
 # Protects short tokens like HP, TV, PC, 3M from mangling.
 # token length ≤ 2: no correction unless exact catalog match
-# token length 3–4: min confidence ≥ 0.88
-# token length ≥ 5: min confidence ≥ 0.80
+# token length 3–4: min confidence ≥ 0.75
+# token length ≥ 5: min confidence ≥ 0.70
 
 MIN_CONFIDENCE_SHORT: float = 0.75   # For tokens 3-4 chars
 MIN_CONFIDENCE_LONG: float = 0.70    # For tokens ≥ 5 chars

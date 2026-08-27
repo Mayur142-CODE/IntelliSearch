@@ -156,7 +156,8 @@ export function SearchPage() {
     interpretation.detected_categories?.length > 0 ||
     interpretation.min_price != null ||
     interpretation.max_price != null ||
-    interpretation.soft_preferences?.length > 0
+    interpretation.soft_preferences?.length > 0 ||
+    Boolean(interpretation.did_you_mean)
   );
 
   return (
@@ -192,6 +193,22 @@ export function SearchPage() {
               <Sparkles className="h-3.5 w-3.5 text-primary" />
               <span>Query Understanding:</span>
             </div>
+            {interpretation.did_you_mean && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchQuery(interpretation.did_you_mean);
+                  runSearch(interpretation.did_you_mean);
+                }}
+                className="group flex items-center gap-1 rounded bg-amber-500/10 px-2 py-0.5 font-medium text-amber-700 dark:text-amber-300 hover:bg-amber-500/20 transition-colors"
+                title="Click to search corrected query"
+              >
+                <span>Did you mean:</span>
+                <span className="underline italic group-hover:text-amber-800 dark:group-hover:text-amber-200">
+                  {interpretation.did_you_mean}
+                </span>
+              </button>
+            )}
             {interpretation.detected_brands?.map((b) => (
               <span key={b} className="rounded bg-primary/10 px-2 py-0.5 font-medium text-primary">
                 Brand: {b}
@@ -209,7 +226,7 @@ export function SearchPage() {
             )}
             {interpretation.soft_preferences?.map((pref) => (
               <span key={pref} className="rounded bg-muted px-2 py-0.5 text-muted-foreground">
-                Intent: {pref}
+                Preference: {pref}
               </span>
             ))}
           </div>

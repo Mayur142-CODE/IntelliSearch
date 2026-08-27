@@ -48,6 +48,8 @@ def search_products_endpoint(
     interpretation_data = {
         "original_query": parsed.raw_query,
         "semantic_query": parsed.semantic_query,
+        "normalized_query": parsed.normalized_query,
+        "did_you_mean": parsed.did_you_mean,
         "detected_brands": parsed.detected_brands,
         "detected_categories": parsed.detected_categories,
         "min_price": min_price if min_price is not None else parsed.min_price,

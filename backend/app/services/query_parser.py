@@ -1,23 +1,19 @@
 """
-Dynamic Query Understanding & Parsing Module — Hardened v2
+Dynamic Query Understanding & Parsing Module — Hardened v2.1
 
 Architecture & Design Principles:
 ---------------------------------
 1. Generic NLP Parsing (Zero hardcoded brands, categories, or typo dictionaries).
 2. Dynamic Vocabulary: Discovered at runtime from PostgreSQL, with SEPARATE
-   per-field indexes (brand, category, product_name, tag) so field-type priority
-   can break ties without one large pool drowning the other.
-3. Dynamic Typo Correction:
-   - Confidence formula: W_SIM * similarity + W_FREQ * freq_score + W_FIELD_PRIORITY * field_bonus
-   - Length-gated thresholds: ≤2 chars no correction (unless exact), 3-4 chars ≥0.88, ≥5 chars ≥0.80
-   - Scorer selection: fuzz.ratio for single-token, token_sort_ratio for multi-word
-   - Phonetic matching ungated from Levenshtein for candidate generation
-   - Multi-candidate OR when top candidates within margin
-4. Price Parser:
-   - Supports k/K/thousand suffixes, currency symbols (₹, $, Rs., rs)
-   - RANGE parsed before UNDER/ABOVE to avoid misread
-   - Price spans removed from ALL downstream text (semantic, fuzzy, exact, partial)
-5. Full pipeline returns ParsedQuery Pydantic model consumed by all downstream stages.
+   per-field indexes (brand, category, product_name, tag) and dynamic product-type
+   to category mappings.
+3. Clean Separation of Stages:
+   Raw Query -> Price Extraction -> Tokenization -> Token Correction ->
+   Normalized Query / "Did you mean" -> Entity Detection on Normalized Tokens ->
+   Intent & Preference Detection -> ParsedQuery.
+4. Glued Stopword / Preposition Handling (e.g., 'oflogitch' -> 'Logitech', 'thephone' -> 'phone').
+5. High-Confidence Entity Gating: Never outputs random or low-confidence brands/categories.
+6. Full pipeline returns ParsedQuery Pydantic model consumed by all downstream search stages.
 """
 
 import math
@@ -53,6 +49,9 @@ STOP_WORDS: Set[str] = {
     "have", "had", "will", "would", "should", "could", "may", "might",
 }
 
+# Glued prefixes that may accidentally be joined to words in user typos
+GLUED_PREFIXES: Tuple[str, ...] = ("of", "the", "for", "in", "to", "by", "a", "an", "on", "at", "with", "from")
+
 # Comparison indicators — suppress hard brand filter for comparative queries
 COMPARISON_INDICATORS: Set[str] = {
     "like", "style", "similar to", "inspired by", "alternatives to",
@@ -74,7 +73,6 @@ PRICE_OPERATOR_WORDS: Set[str] = {
     "max", "maximum", "min", "minimum", "up", "least", "most",
 }
 
-6566                                                                               
 
 # ============================================================================
 # §2.1 — ParsedQuery Data Contract (Pydantic)
@@ -88,11 +86,13 @@ class PriceConstraint(BaseModel):
 
 
 class TokenCorrection(BaseModel):
-    """Per-token correction record with confidence and source field."""
+    """Per-token correction record with confidence, similarity, and source field."""
     original: str
     corrected: str
     confidence: float = 0.0     # 0.0–1.0
     source_field: str = "uncorrected"  # brand | category | product_name | tag | description | uncorrected
+    similarity: float = 0.0
+    phonetic_match: bool = False
 
     model_config = {"frozen": False}
 
@@ -105,13 +105,14 @@ class ParsedQuery(BaseModel):
     """
     raw_query: str = ""
     normalized_query: str = ""
+    did_you_mean: Optional[str] = None
     price: Optional[PriceConstraint] = None
     tokens: List[TokenCorrection] = Field(default_factory=list)
     semantic_query: str = ""
     is_explicit_product_query: bool = False
     detected_category_anchor: Optional[str] = None
     detected_brand_anchor: Optional[str] = None
-    # Additional fields for backward compatibility and ranking
+    # Additional fields for ranking and interpretation
     detected_brands: List[str] = Field(default_factory=list)
     detected_categories: List[str] = Field(default_factory=list)
     normalized_query_variants: List[str] = Field(default_factory=list)
@@ -140,6 +141,7 @@ class ParsedQuery(BaseModel):
         return {
             "raw_query": self.raw_query,
             "normalized_query": self.normalized_query,
+            "did_you_mean": self.did_you_mean,
             "semantic_query": self.semantic_query,
             "price": self.price.model_dump() if self.price else None,
             "tokens": [t.model_dump() for t in self.tokens],
@@ -205,11 +207,6 @@ class CatalogVocabulary:
     """
     In-memory singleton holding catalog vocabulary discovered dynamically from PostgreSQL.
     Zero hardcoded brand/category names.
-
-    Key difference from v1: vocabulary is split into SEPARATE per-field indexes
-    (brand_vocab, category_vocab, product_name_vocab, tag_vocab) so that brand
-    corrections compete fairly against product-name corrections instead of one
-    large pool drowning the other.
     """
     _instance: Optional["CatalogVocabulary"] = None
 
@@ -218,6 +215,8 @@ class CatalogVocabulary:
         self.categories: List[str] = []
         self.brand_lower_map: Dict[str, str] = {}
         self.category_lower_map: Dict[str, str] = {}
+        # Dynamic mapping from product-type tokens to their dominant category
+        self.product_type_to_category: Dict[str, str] = {}
         # Field-separated vocab indexes (§3.1)
         self.brand_vocab: List[_FieldVocabEntry] = []
         self.category_vocab: List[_FieldVocabEntry] = []
@@ -255,6 +254,7 @@ class CatalogVocabulary:
         category_freq: Counter = Counter()
         product_name_freq: Counter = Counter()
         tag_freq: Counter = Counter()
+        product_token_cats = defaultdict(Counter)
 
         products_data = db.execute(
             select(Product.product_name, Product.brand, Product.category, Product.tags, Product.description)
@@ -270,11 +270,25 @@ class CatalogVocabulary:
                 for token in self._tokenize_field(category):
                     category_freq[token] += 1
             if pname:
-                for token in self._tokenize_field(pname):
+                tokens = self._tokenize_field(pname)
+                for token in tokens:
                     product_name_freq[token] += 1
+                    if category and len(token) >= 3 and token not in STOP_WORDS:
+                        product_token_cats[token][category] += 1
             if tags:
-                for token in self._tokenize_field(str(tags)):
+                tokens = self._tokenize_field(str(tags))
+                for token in tokens:
                     tag_freq[token] += 1
+                    if category and len(token) >= 3 and token not in STOP_WORDS:
+                        product_token_cats[token][category] += 1
+
+        # Dynamic product-type to category mapping (e.g. 'mouse' -> 'Electronics')
+        self.product_type_to_category = {}
+        for token, cat_counter in product_token_cats.items():
+            top_cat, top_count = cat_counter.most_common(1)[0]
+            total_count = sum(cat_counter.values())
+            if (top_count / float(total_count) >= 0.50) and top_count >= 2:
+                self.product_type_to_category[token] = top_cat
 
         # Build vocab entries per field
         self.brand_vocab = self._build_vocab_entries(brand_freq, self.brands, "brand")
@@ -318,11 +332,7 @@ class CatalogVocabulary:
     def _build_vocab_entries(
         self, freq: Counter, canonical_values: List[str], field: str
     ) -> List[_FieldVocabEntry]:
-        """Build vocab entries for brands/categories.
-
-        Each canonical value (e.g. 'Nike') contributes both itself as a whole
-        and its individual tokens.
-        """
+        """Build vocab entries for brands/categories."""
         entries = []
         seen_tokens: Set[str] = set()
 
@@ -361,20 +371,19 @@ class CatalogVocabulary:
         return entries
 
     # ==================================================================
-    # §3.2 + §3.3 — Token Correction with Field Priority
+    # §3.2 + §3.3 — Token Correction with Strict Confidence & Preposition Handling
     # ==================================================================
 
     def correct_token(self, token: str) -> List[TokenCorrection]:
         """Correct a single token against field-separated vocabularies.
 
-        Returns a list of correction candidates sorted by confidence.
-        Uses fuzz.ratio (full-string Levenshtein-based similarity) for
-        single-token correction — NOT token_set_ratio.
-
-        Phonetic matching is an INDEPENDENT candidate path, not gated
-        behind Levenshtein distance.
+        Handles:
+        1. Exact matches across brands/categories/products.
+        2. Glued prepositions (e.g. 'oflogitch' -> 'Logitech').
+        3. Damerau-Levenshtein, RapidFuzz ratio, Jaro-Winkler, and Soundex.
+        4. Strict length-gated thresholds so weak matches remain uncorrected.
         """
-        lower_tok = token.lower()
+        lower_tok = token.lower().strip()
         tok_len = len(lower_tok)
 
         # ≤2 chars: no correction unless exact catalog match
@@ -383,26 +392,57 @@ class CatalogVocabulary:
             if exact:
                 return [TokenCorrection(
                     original=token, corrected=exact[0],
-                    confidence=1.0, source_field=exact[1],
+                    confidence=1.0, source_field=exact[1], similarity=1.0,
                 )]
-            return [TokenCorrection(original=token, corrected=token, confidence=0.0, source_field="uncorrected")]
+            return [TokenCorrection(original=token, corrected=token, confidence=0.0, source_field="uncorrected", similarity=0.0)]
 
         # Skip stop words and digits
         if lower_tok in STOP_WORDS or lower_tok.isdigit():
-            return [TokenCorrection(original=token, corrected=token, confidence=0.0, source_field="uncorrected")]
+            return [TokenCorrection(original=token, corrected=token, confidence=0.0, source_field="uncorrected", similarity=0.0)]
 
         # Check exact match first (any field)
         exact = self._check_exact_match(lower_tok)
         if exact:
             return [TokenCorrection(
                 original=token, corrected=exact[0],
-                confidence=1.0, source_field=exact[1],
+                confidence=1.0, source_field=exact[1], similarity=1.0,
             )]
+
+        # Check exact match in product name / tag vocabs
+        for entry in self.product_name_vocab:
+            if entry.token == lower_tok:
+                return [TokenCorrection(
+                    original=token, corrected=token,
+                    confidence=1.0, source_field="product_name", similarity=1.0,
+                )]
+        for entry in self.tag_vocab:
+            if entry.token == lower_tok:
+                return [TokenCorrection(
+                    original=token, corrected=token,
+                    confidence=1.0, source_field="tag", similarity=1.0,
+                )]
+
+        # Check glued preposition/stopword prefix (e.g. 'oflogitch' -> 'logitch')
+        stripped_tok = None
+        for pfx in GLUED_PREFIXES:
+            if lower_tok.startswith(pfx) and len(lower_tok) - len(pfx) >= 3:
+                candidate_sub = lower_tok[len(pfx):]
+                # If stripped sub-token is exact match
+                sub_exact = self._check_exact_match(candidate_sub)
+                if sub_exact:
+                    return [TokenCorrection(
+                        original=token, corrected=sub_exact[0],
+                        confidence=0.95, source_field=sub_exact[1], similarity=0.95,
+                    )]
+                stripped_tok = candidate_sub
+                break
 
         # Collect candidates from all field vocabs
         tok_soundex = _soundex(lower_tok)
         col_tok = re.sub(r'(.)\1+', r'\1', lower_tok)
         col_soundex = _soundex(col_tok)
+        stripped_soundex = _soundex(stripped_tok) if stripped_tok else None
+
         candidates: List[TokenCorrection] = []
 
         # Search each field vocabulary separately
@@ -413,37 +453,46 @@ class CatalogVocabulary:
             (self.tag_vocab, "tag"),
         ]:
             for entry in field_vocab:
-                # Skip very short vocab entries when matching longer tokens
                 if len(entry.token) < 3 and tok_len >= 3:
                     continue
 
-                # Compute edit distance on both raw and repeat-collapsed token (handles transpositions)
+                # Compute edit distance on raw, repeat-collapsed, and stripped tokens
                 dist_raw = distance.DamerauLevenshtein.distance(lower_tok, entry.token)
                 dist_col = distance.DamerauLevenshtein.distance(col_tok, entry.token)
-                dist = min(dist_raw, dist_col)
+                dist_strip = distance.DamerauLevenshtein.distance(stripped_tok, entry.token) if stripped_tok else 999
+                dist = min(dist_raw, dist_col, dist_strip)
 
                 # Determine max distance based on token length
                 max_dist = MAX_EDIT_DISTANCE_SHORT if tok_len <= 4 else MAX_EDIT_DISTANCE_LONG
+                # For longer tokens (>= 7 chars), allow distance 3 if stripped prefix or partial match is strong
+                if tok_len >= 7 and (dist_strip <= 2 or fuzz.partial_ratio(lower_tok, entry.token) >= 85):
+                    max_dist = 3
 
-                # Phonetic match check (independent of Levenshtein)
-                phonetic_match = (entry.soundex == tok_soundex or entry.soundex == col_soundex) and len(lower_tok) >= 3
+                # Phonetic match check
+                phonetic_match = (
+                    entry.soundex == tok_soundex or
+                    entry.soundex == col_soundex or
+                    (stripped_soundex is not None and entry.soundex == stripped_soundex)
+                ) and len(lower_tok) >= 3
 
-                # Candidate passes if within Levenshtein threshold OR has phonetic match
                 if dist <= max_dist or (phonetic_match and dist <= MAX_EDIT_DISTANCE_PHONETIC):
                     ratio_raw = fuzz.ratio(lower_tok, entry.token) / 100.0
                     ratio_col = fuzz.ratio(col_tok, entry.token) / 100.0
-                    ratio_sim = max(ratio_raw, ratio_col)
+                    ratio_strip = (fuzz.ratio(stripped_tok, entry.token) / 100.0) if stripped_tok else 0.0
+                    ratio_sim = max(ratio_raw, ratio_col, ratio_strip)
 
                     jw_raw = distance.JaroWinkler.similarity(lower_tok, entry.token)
                     jw_col = distance.JaroWinkler.similarity(col_tok, entry.token)
-                    jw_sim = max(jw_raw, jw_col)
+                    jw_strip = distance.JaroWinkler.similarity(stripped_tok, entry.token) if stripped_tok else 0.0
+                    jw_sim = max(jw_raw, jw_col, jw_strip)
 
-                    lev_sim = 1.0 - (float(dist) / max(tok_len, len(entry.token)))
+                    eff_len = len(stripped_tok) if (stripped_tok and dist == dist_strip) else tok_len
+                    lev_sim = max(0.0, 1.0 - (float(dist) / max(eff_len, len(entry.token))))
                     similarity = (0.40 * lev_sim) + (0.30 * ratio_sim) + (0.30 * jw_sim)
 
-                    # Compute confidence (§3.3)
+                    # Compute confidence with balanced weights
                     freq_score = math.log1p(entry.count) / math.log1p(self.max_frequency) if self.max_frequency > 0 else 0.0
-                    field_bonus = FIELD_PRIORITY_BONUS.get(entry.field, 0.0)
+                    field_bonus = FIELD_PRIORITY_BONUS.get(entry.field, 0.50)
 
                     confidence = (
                         W_SIM * similarity +
@@ -451,7 +500,6 @@ class CatalogVocabulary:
                         W_FIELD_PRIORITY * field_bonus
                     )
 
-                    # Phonetic match bonus
                     if phonetic_match:
                         confidence += 0.05
 
@@ -460,10 +508,12 @@ class CatalogVocabulary:
                         corrected=entry.canonical if entry.field in ("brand", "category") else entry.token,
                         confidence=min(confidence, 1.0),
                         source_field=entry.field,
+                        similarity=round(similarity, 4),
+                        phonetic_match=phonetic_match,
                     ))
 
         if not candidates:
-            return [TokenCorrection(original=token, corrected=token, confidence=0.0, source_field="uncorrected")]
+            return [TokenCorrection(original=token, corrected=token, confidence=0.0, source_field="uncorrected", similarity=0.0)]
 
         # Sort by confidence descending
         candidates.sort(key=lambda c: c.confidence, reverse=True)
@@ -471,14 +521,13 @@ class CatalogVocabulary:
         # Length-gated threshold check (§3.4)
         min_conf = MIN_CONFIDENCE_SHORT if tok_len <= 4 else MIN_CONFIDENCE_LONG
         if candidates[0].confidence < min_conf:
-            return [TokenCorrection(original=token, corrected=token, confidence=0.0, source_field="uncorrected")]
+            return [TokenCorrection(original=token, corrected=token, confidence=0.0, source_field="uncorrected", similarity=0.0)]
 
-        # Multi-candidate handling (§3.5): retain near-ties in different fields
+        # Retain near-tie candidates for variants
         result = [candidates[0]]
         top_conf = candidates[0].confidence
         for c in candidates[1:]:
             if (top_conf - c.confidence) <= MULTI_CANDIDATE_MARGIN:
-                # Only keep if it's from a different field (adds diversity)
                 if c.source_field != result[0].source_field or c.corrected != result[0].corrected:
                     result.append(c)
                     if len(result) >= 3:
@@ -497,31 +546,26 @@ class CatalogVocabulary:
         return None
 
     # ==================================================================
-    # Brand / Category Detection
+    # Brand / Category Detection (Strict Confidence Gated)
     # ==================================================================
 
-    def find_matching_brand(self, token_or_phrase: str, is_single_token_query: bool = False) -> Optional[Tuple[str, float, bool]]:
+    def find_matching_brand(self, token_or_phrase: str, min_confidence: float = 80.0) -> Optional[Tuple[str, float, bool]]:
         """Match a token or multi-word phrase against catalog brands.
 
         Returns (canonical_brand_name, confidence_score, is_exact_match) or None.
-        Uses fuzz.ratio for single-token matching (§3.2).
         """
         if not self._is_loaded or not token_or_phrase:
             return None
 
         q = token_or_phrase.strip().lower()
-        if not q or len(q) < 2:
+        if not q or len(q) < 2 or q in STOP_WORDS or q in self.category_lower_map:
             return None
 
         # 1. Exact match (case-insensitive)
         if q in self.brand_lower_map:
             return self.brand_lower_map[q], 100.0, True
 
-        # Never fuzzy-match stop words, very short tokens, or exact category names/tokens against brands
-        if q in STOP_WORDS or len(q) <= 2 or q in self.category_lower_map:
-            return None
-
-        # Check if q is a token in any category name (e.g. 'gaming' in 'Gaming', 'audio' in 'Audio')
+        # Check if q is a token in any category name
         is_cat_token = any(
             q in [t.lower() for t in re.split(r'[\s&,/\-]+', cat)]
             for cat in self.category_lower_map
@@ -529,7 +573,7 @@ class CatalogVocabulary:
         if is_cat_token:
             return None
 
-        # 2. Fuzzy match using fuzz.ratio (§3.2 — single-token scorer)
+        # 2. Fuzzy match against catalog brands
         best_brand = None
         best_score = 0.0
 
@@ -542,29 +586,27 @@ class CatalogVocabulary:
             jw = float(distance.JaroWinkler.similarity(q, lower_brand)) * 100.0
             eff_similarity = max(ratio, jw)
 
-            # Short brands (3-4 chars, e.g. "Nike", "Sony", "Puma", "Dell")
+            # Short brands (3-4 chars, e.g. "Nike", "Sony", "Dell", "Puma")
             if len(lower_brand) <= 4:
-                if dist <= 1 or eff_similarity >= 75.0:
-                    score = max(eff_similarity, 100.0 - (dist * 20.0))
+                if dist <= 1 and eff_similarity >= 80.0:
+                    score = max(eff_similarity, 100.0 - (dist * 15.0))
                     if score > best_score:
                         best_score = score
                         best_brand = canonical
             else:
-                # Longer brands (>= 5 chars, e.g. "Adidas", "Samsung", "Logitech")
-                if (dist <= 1 and eff_similarity >= 75.0) or (dist <= 2 and ratio >= 75.0 and eff_similarity >= 85.0):
-                    if not is_single_token_query and len(q) <= 4 and dist > 0:
-                        continue
+                # Longer brands (>= 5 chars, e.g. "Logitech", "Samsung", "Adidas")
+                if (dist <= 1 and eff_similarity >= 80.0) or (dist <= 2 and ratio >= 80.0 and eff_similarity >= 85.0):
                     if eff_similarity > best_score:
                         best_score = eff_similarity
                         best_brand = canonical
 
-        if best_brand and best_score >= 75.0:
+        if best_brand and best_score >= min_confidence:
             return best_brand, best_score, False
 
         return None
 
-    def find_matching_category(self, token_or_phrase: str) -> Optional[Tuple[str, float]]:
-        """Match a token or phrase against catalog categories.
+    def find_matching_category(self, token_or_phrase: str, min_confidence: float = 80.0) -> Optional[Tuple[str, float]]:
+        """Match a token or phrase against catalog categories and dynamic product-type mappings.
 
         Returns (canonical_category_name, confidence_score) or None.
         """
@@ -580,13 +622,16 @@ class CatalogVocabulary:
             return self.category_lower_map[q], 100.0
 
         # 2. Token-level match against multi-word categories
-        # e.g. "electronics" matches "Electronics", "audio" matches "Audio"
         for lower_cat, canonical in self.category_lower_map.items():
             cat_tokens = [t.lower() for t in re.split(r'[\s&,/\-]+', lower_cat) if len(t) >= 3]
             if q in cat_tokens:
                 return canonical, 95.0
 
-        # 3. High-confidence fuzzy match (e.g. "eletronics" -> "Electronics")
+        # 3. Dynamic Product-Type to Category Mapping (e.g. 'mouse' -> 'Electronics')
+        if q in self.product_type_to_category:
+            return self.product_type_to_category[q], 90.0
+
+        # 4. High-confidence fuzzy match (e.g. "eletronics" -> "Electronics")
         best_cat = None
         best_score = 0.0
         for lower_cat, canonical in self.category_lower_map.items():
@@ -595,7 +640,7 @@ class CatalogVocabulary:
                 best_score = ratio
                 best_cat = canonical
 
-        if best_cat:
+        if best_cat and best_score >= min_confidence:
             return best_cat, best_score
 
         return None
@@ -608,7 +653,6 @@ class CatalogVocabulary:
 def _normalize_amount(raw: str) -> float:
     """Normalize a price amount string to a float, handling k/K and 'thousand'."""
     raw = raw.strip().lower().replace(",", "")
-    # Strip currency symbols and text prefixes
     raw = re.sub(r'^[₹$]|^rs\.?\s*|^inr\s*|^usd\s*', '', raw, flags=re.IGNORECASE).strip()
     raw = re.sub(r'[₹$]|rs\.?|inr|usd', '', raw, flags=re.IGNORECASE).strip()
     if raw.endswith("k"):
@@ -620,21 +664,14 @@ def _normalize_amount(raw: str) -> float:
     return float(raw)
 
 
-# Currency prefix pattern for regex
 _CURRENCY = r"(?:₹|rs\.?\s*|inr\s*|\$|usd\s*)?"
-_CURRENCY_ALL = r"(?:₹|rs\.?\s*|inr\s*|\$|usd\s*)?"
-
-# Number pattern that supports k/K suffix, commas, and 'thousand'
 _NUMBER = r"[\d]+(?:[,.][\d]+)*\s*(?:k|K|thousand)?"
 
-# Operators lists for fuzzy/typo matching
 _UPPER_OPERATOR_WORDS = {"under", "unders", "undr", "below", "belw", "blo", "less", "les", "upto", "max", "maximum", "within", "sub", "cheaper"}
 _LOWER_OPERATOR_WORDS = {"above", "abov", "abovee", "over", "ovr", "more", "min", "minimum", "higher", "starting", "from", "least"}
-_RANGE_OPERATOR_WORDS = {"between", "btwn", "range", "from"}
 
-# Price patterns — RANGE must be attempted BEFORE UNDER/ABOVE (§4.3)
 _PRICE_PATTERNS = [
-    # 1. Range: "between 300 and 700", "btwn 300 and 700", "₹300 to ₹700", "300-700", "300 to 700"
+    # 1. Range
     (
         re.compile(
             rf"\b(?:between|btwn|from|range\s+of)?\s*{_CURRENCY}\s*({_NUMBER})\s*(?:and|to|\-)\s*{_CURRENCY}\s*({_NUMBER})\b",
@@ -642,7 +679,7 @@ _PRICE_PATTERNS = [
         ),
         "range",
     ),
-    # 2. Upper bound (prefix): "under 500", "unders 160", "undr 160", "below 2k", "less than 500", "up to 500", "upto 500", "max 500", "<= 500"
+    # 2. Upper bound (prefix)
     (
         re.compile(
             rf"\b(?:under|unders|undr|below|belw|blo|less\s+than|les\s+than|lessthan|up\s+to|upto|max|maximum|at\s+most|atmost|within|sub|cheaper\s+than|budget\s+of|<=?)\s*{_CURRENCY}\s*({_NUMBER})\b",
@@ -650,7 +687,7 @@ _PRICE_PATTERNS = [
         ),
         "max",
     ),
-    # 3. Upper bound (suffix): "500 or less", "160 max", "160 budget", "500 and under"
+    # 3. Upper bound (suffix)
     (
         re.compile(
             rf"\b{_CURRENCY}\s*({_NUMBER})\s*(?:or\s+less|or\s+below|max|maximum|budget|and\s+under)\b",
@@ -658,7 +695,7 @@ _PRICE_PATTERNS = [
         ),
         "max",
     ),
-    # 4. Lower bound (prefix): "above 500", "abov 500", "abovee 500", "over 10k", "ovr 10k", "more than 500", "min 500", ">= 500", "starting from 500"
+    # 4. Lower bound (prefix)
     (
         re.compile(
             rf"\b(?:above|abov|abovee|over|ovr|more\s+than|morethan|min|minimum|at\s+least|atleast|higher\s+than|starting\s+from|from|>=?)\s*{_CURRENCY}\s*({_NUMBER})\b",
@@ -666,7 +703,7 @@ _PRICE_PATTERNS = [
         ),
         "min",
     ),
-    # 5. Lower bound (suffix): "500+", "500 and above", "500 or more", "500 min"
+    # 5. Lower bound (suffix)
     (
         re.compile(
             rf"\b{_CURRENCY}\s*({_NUMBER})\s*(?:\+|and\s+above|and\s+over|or\s+more|min|minimum)\b",
@@ -678,11 +715,7 @@ _PRICE_PATTERNS = [
 
 
 def _extract_price_constraint(text: str) -> Tuple[Optional[PriceConstraint], str]:
-    """Extract price constraint from query text using regex patterns and dynamic fuzzy operator matching.
-
-    Returns (PriceConstraint or None, remaining_text_with_price_span_removed).
-    """
-    # 1. First attempt structured regex matching
+    """Extract price constraint from query text using regex patterns and fuzzy operator matching."""
     for pattern, kind in _PRICE_PATTERNS:
         match = pattern.search(text)
         if match:
@@ -711,7 +744,6 @@ def _extract_price_constraint(text: str) -> Tuple[Optional[PriceConstraint], str
                 else:
                     continue
 
-                # Remove the matched price span from the text
                 remaining = text[:match.start()] + " " + text[match.end():]
                 remaining = _strip_dangling_operators(remaining)
                 remaining = re.sub(r"\s+", " ", remaining).strip()
@@ -720,17 +752,15 @@ def _extract_price_constraint(text: str) -> Tuple[Optional[PriceConstraint], str
             except (ValueError, IndexError):
                 continue
 
-    # 2. Dynamic Fuzzy Price Operator Scanner (catches typos like "unders 160", "undr 2k", "abov 500")
+    # Dynamic Fuzzy Price Operator Scanner
     words = text.split()
     for i, word in enumerate(words):
-        # Check if word looks like a price number (e.g. "160", "2k", "$500", "₹1000", "1500")
         num_clean = re.sub(r'^[₹$]|^rs\.?\s*|^inr\s*|^usd\s*', '', word, flags=re.IGNORECASE)
         num_clean = re.sub(r'[₹$]|rs\.?|inr|usd', '', num_clean, flags=re.IGNORECASE)
         is_num = bool(re.match(r'^\d+(?:\.\d+)?(?:k|K|thousand)?$', num_clean))
 
         if is_num and i > 0:
             prev_word = words[i - 1].lower().strip(".,;:!?")
-            # Check if prev_word fuzzy-matches an upper bound operator
             is_upper = any(
                 distance.Levenshtein.distance(prev_word, op) <= 1 or fuzz.ratio(prev_word, op) >= 75
                 for op in _UPPER_OPERATOR_WORDS
@@ -738,7 +768,6 @@ def _extract_price_constraint(text: str) -> Tuple[Optional[PriceConstraint], str
             if is_upper:
                 try:
                     val = _normalize_amount(num_clean)
-                    # Find span in original text
                     pattern = re.compile(rf"\b{re.escape(words[i-1])}\s+{re.escape(word)}\b", re.IGNORECASE)
                     m = pattern.search(text)
                     span = (m.start(), m.end()) if m else (0, 0)
@@ -749,7 +778,6 @@ def _extract_price_constraint(text: str) -> Tuple[Optional[PriceConstraint], str
                 except Exception:
                     pass
 
-            # Check if prev_word fuzzy-matches a lower bound operator
             is_lower = any(
                 distance.Levenshtein.distance(prev_word, op) <= 1 or fuzz.ratio(prev_word, op) >= 75
                 for op in _LOWER_OPERATOR_WORDS
@@ -776,44 +804,34 @@ def _strip_dangling_operators(text: str) -> str:
     cleaned = []
     for tok in tokens:
         lower_tok = tok.lower().strip(".,;:!?")
-        # Only remove if it's a pure operator word (not part of a brand like "Under Armour")
         if lower_tok in PRICE_OPERATOR_WORDS and len(tok) == len(lower_tok):
             continue
         cleaned.append(tok)
     return " ".join(cleaned)
 
 
-# ============================================================================
-# §7 — Semantic Query Construction
-# ============================================================================
-
 def _build_semantic_query(remaining_text: str) -> str:
-    """Build clean semantic query from remaining text after price extraction.
-
-    Keeps descriptive/preference adjectives. Strips bare comparison operators
-    and dangling punctuation.
-    """
+    """Build clean semantic query from remaining text after price extraction."""
     if not remaining_text or not remaining_text.strip():
         return ""
-
-    # Remove bare comparison operators left after price extraction
     cleaned = remaining_text.strip()
-    # Remove standalone < > <= >= symbols
     cleaned = re.sub(r'\s*[<>]=?\s*', ' ', cleaned)
-    # Collapse whitespace
     cleaned = re.sub(r'\s+', ' ', cleaned).strip()
     return cleaned
 
 
 # ============================================================================
-# Main Parse Function
+# Main Parse Function (Clean Separation of Correction & Entity Detection)
 # ============================================================================
 
 def parse_query(db: Session, raw_query: str) -> ParsedQuery:
     """Parse a raw user search query into a structured ParsedQuery.
 
-    This is the single entry point. All downstream stages consume
-    the returned ParsedQuery — no stage re-parses the raw string.
+    Pipeline:
+    1. Extract Price -> Produces semantic_query without price span.
+    2. Tokenize & Typo Correct -> Produces high-confidence normalized query.
+    3. Detect Entities (Brand, Category, Preference) strictly on normalized tokens.
+    4. Guard with confidence gating.
     """
     cleaned_original = raw_query.strip()
     if not cleaned_original:
@@ -822,136 +840,127 @@ def parse_query(db: Session, raw_query: str) -> ParsedQuery:
     vocab = CatalogVocabulary.get_instance()
     vocab.load(db)
 
-    # ===================================================================
-    # Step 1: Extract Price Constraints & Strip Price Phrase (§4)
-    # ===================================================================
+    # -------------------------------------------------------------------
+    # Step 1: Price Constraints & Semantic Query
+    # -------------------------------------------------------------------
     price_constraint, remaining_text = _extract_price_constraint(cleaned_original)
+    base_semantic_text = _build_semantic_query(remaining_text)
+    if not base_semantic_text:
+        base_semantic_text = cleaned_original
 
-    # Build the semantic query (price-stripped, operator-cleaned)
-    semantic_query = _build_semantic_query(remaining_text)
-    if not semantic_query:
-        semantic_query = cleaned_original
-
-    # ===================================================================
-    # Step 2: Tokenize & Correct Tokens (§3)
-    # ===================================================================
-    raw_tokens = [t for t in re.split(r'[\s,\-/]+', semantic_query) if t and len(t) >= 1]
+    # -------------------------------------------------------------------
+    # Step 2: Token Typo Correction
+    # -------------------------------------------------------------------
+    raw_tokens = [t for t in re.split(r'[\s,\-/]+', base_semantic_text) if t and len(t) >= 1]
     corrected_tokens: List[TokenCorrection] = []
     normalized_parts: List[str] = []
+    has_real_correction = False
 
     for tok in raw_tokens:
         corrections = vocab.correct_token(tok)
         corrected_tokens.extend(corrections)
-        # Use the top correction for the normalized query
-        if corrections and corrections[0].source_field != "uncorrected":
-            normalized_parts.append(corrections[0].corrected)
+        top = corrections[0]
+        if top.source_field != "uncorrected" and top.confidence >= 0.70:
+            normalized_parts.append(top.corrected)
+            if top.corrected.lower() != tok.lower() and top.confidence >= 0.75:
+                has_real_correction = True
         else:
             normalized_parts.append(tok)
 
-    # Build normalized query variants from multi-candidate corrections
-    primary_variant = " ".join(normalized_parts)
-    variants = [primary_variant]
+    normalized_query = " ".join(normalized_parts)
 
-    # Generate alternative variants from OR'd candidates (§3.5)
-    # Only generate a few to avoid combinatorial explosion
-    alt_parts = list(normalized_parts)
-    for i, tok in enumerate(raw_tokens):
-        corrections = vocab.correct_token(tok)
-        if len(corrections) > 1 and corrections[1].source_field != "uncorrected":
-            alt_parts_copy = list(normalized_parts)
-            alt_parts_copy[i] = corrections[1].corrected
-            alt_variant = " ".join(alt_parts_copy)
-            if alt_variant not in variants:
-                variants.append(alt_variant)
-                if len(variants) >= 4:
-                    break
+    # Set "Did you mean" only when meaningful high-confidence correction occurred
+    did_you_mean = normalized_query if (has_real_correction and normalized_query.lower() != base_semantic_text.lower()) else None
 
-    # ===================================================================
-    # Step 3: Detect Brands & Categories (§5)
-    # ===================================================================
+    # Primary semantic search text uses normalized query if corrected, else base text
+    effective_semantic_query = normalized_query if has_real_correction else base_semantic_text
+
+    # Build variants for ChromaDB/fuzzy candidate retrieval
+    variants = [effective_semantic_query]
+    if base_semantic_text not in variants:
+        variants.append(base_semantic_text)
+
+    # -------------------------------------------------------------------
+    # Step 3: Entity Detection on CORRECTED Tokens
+    # -------------------------------------------------------------------
     detected_brands: List[str] = []
     detected_categories: List[str] = []
     detected_brand_anchor: Optional[str] = None
     detected_category_anchor: Optional[str] = None
     has_exact_brand_match = False
 
-    # Check multi-word windows (1 to 3 words) for brand matching
-    search_tokens = [t for t in re.split(r'[\s,\-/]+', semantic_query) if t]
-    is_single_word = len(search_tokens) == 1
-    matched_brand_names: Set[str] = set()
+    # 3A. First inspect high-confidence token corrections
+    for tc in corrected_tokens:
+        if tc.source_field == "brand" and tc.confidence >= 0.75:
+            if tc.corrected not in detected_brands:
+                detected_brands.append(tc.corrected)
+                if detected_brand_anchor is None:
+                    detected_brand_anchor = tc.corrected
+            if tc.confidence == 1.0 or tc.original.lower() == tc.corrected.lower():
+                has_exact_brand_match = True
 
-    for n in range(min(3, len(search_tokens)), 0, -1):
-        for i in range(len(search_tokens) - n + 1):
-            window = " ".join(search_tokens[i:i + n])
-            match_res = vocab.find_matching_brand(window, is_single_token_query=is_single_word)
-            if match_res:
-                brand_name, confidence, is_exact = match_res
+        if tc.source_field == "category" and tc.confidence >= 0.75:
+            if tc.corrected not in detected_categories:
+                detected_categories.append(tc.corrected)
+                if detected_category_anchor is None:
+                    detected_category_anchor = tc.corrected
+
+    # 3B. Multi-word sliding window check over NORMALIZED tokens
+    norm_tokens = [t for t in re.split(r'[\s,\-/]+', normalized_query) if t]
+    for n in range(min(3, len(norm_tokens)), 0, -1):
+        for i in range(len(norm_tokens) - n + 1):
+            window = " ".join(norm_tokens[i:i + n])
+            
+            # Brand matching
+            brand_res = vocab.find_matching_brand(window, min_confidence=80.0)
+            if brand_res:
+                bname, bconf, is_exact = brand_res
+                if bname not in detected_brands:
+                    detected_brands.append(bname)
+                    if detected_brand_anchor is None:
+                        detected_brand_anchor = bname
                 if is_exact:
                     has_exact_brand_match = True
-                if brand_name not in matched_brand_names:
-                    matched_brand_names.add(brand_name)
-                    detected_brands.append(brand_name)
-                    if detected_brand_anchor is None:
-                        detected_brand_anchor = brand_name
 
-    # Also check corrected tokens for brand matches
-    for tc in corrected_tokens:
-        if tc.source_field == "brand" and tc.corrected not in matched_brand_names:
-            matched_brand_names.add(tc.corrected)
-            detected_brands.append(tc.corrected)
-            if detected_brand_anchor is None:
-                detected_brand_anchor = tc.corrected
-
-    # Check tokens and full query for category matching
-    matched_cat_names: Set[str] = set()
-    for n in range(min(3, len(search_tokens)), 0, -1):
-        for i in range(len(search_tokens) - n + 1):
-            window = " ".join(search_tokens[i:i + n])
-            cat_res = vocab.find_matching_category(window)
+            # Category matching
+            cat_res = vocab.find_matching_category(window, min_confidence=80.0)
             if cat_res:
-                cat_name, confidence = cat_res
-                if cat_name not in matched_cat_names:
-                    matched_cat_names.add(cat_name)
-                    detected_categories.append(cat_name)
-                    if detected_category_anchor is None and confidence >= CATEGORY_MATCH_CONFIDENCE_MIN:
-                        detected_category_anchor = cat_name
+                cname, cconf = cat_res
+                if cname not in detected_categories:
+                    detected_categories.append(cname)
+                    if detected_category_anchor is None:
+                        detected_category_anchor = cname
 
-    # Also check corrected tokens for category matches
-    for tc in corrected_tokens:
-        if tc.source_field == "category" and tc.corrected not in matched_cat_names:
-            matched_cat_names.add(tc.corrected)
-            detected_categories.append(tc.corrected)
-            if detected_category_anchor is None:
-                detected_category_anchor = tc.corrected
-
-    # ===================================================================
-    # Step 4: Comparison Indicators (§5) & Hard-Filter Safety
-    # ===================================================================
+    # -------------------------------------------------------------------
+    # Step 4: Comparison & Hard-Filter Safety
+    # -------------------------------------------------------------------
     lower_query = cleaned_original.lower()
     is_comparative = any(comp in lower_query for comp in COMPARISON_INDICATORS)
+    is_single_word = len(norm_tokens) == 1
 
-    # Brand hard-filter applies when:
-    # 1. Non-comparative query AND
-    # 2. Either has an exact brand match (e.g. "Nike shoes") OR is a single-token brand search (e.g. "nykee")
     is_brand_hard_filter = bool(
         detected_brands and not is_comparative and (has_exact_brand_match or is_single_word)
     )
-    is_category_hard_filter = bool(detected_category_anchor and not is_comparative and is_single_word)
+    is_category_hard_filter = bool(
+        detected_category_anchor and not is_comparative and is_single_word
+    )
     is_explicit_product_query = bool(detected_category_anchor)
 
-    # ===================================================================
-    # Step 5: Detect Soft Preferences
-    # ===================================================================
+    # -------------------------------------------------------------------
+    # Step 5: Soft Preferences
+    # -------------------------------------------------------------------
     detected_soft_preferences = [
-        pref for pref in SOFT_PREFERENCE_TERMS if pref in lower_query
+        pref for pref in SOFT_PREFERENCE_TERMS
+        if pref in normalized_query.lower() or pref in lower_query
     ]
 
     return ParsedQuery(
         raw_query=cleaned_original,
-        normalized_query=primary_variant,
+        normalized_query=normalized_query,
+        did_you_mean=did_you_mean,
         price=price_constraint,
         tokens=corrected_tokens,
-        semantic_query=semantic_query,
+        semantic_query=effective_semantic_query,
         is_explicit_product_query=is_explicit_product_query,
         detected_category_anchor=detected_category_anchor,
         detected_brand_anchor=detected_brand_anchor,
@@ -962,3 +971,4 @@ def parse_query(db: Session, raw_query: str) -> ParsedQuery:
         is_brand_hard_filter=is_brand_hard_filter,
         is_category_hard_filter=is_category_hard_filter,
     )
+

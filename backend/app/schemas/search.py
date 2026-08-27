@@ -30,6 +30,7 @@ class QueryInterpretation(BaseModel):
     original_query: str
     semantic_query: str
     normalized_query: Optional[str] = None
+    did_you_mean: Optional[str] = None
     detected_brands: List[str] = []
     detected_categories: List[str] = []
     detected_brand_anchor: Optional[str] = None
