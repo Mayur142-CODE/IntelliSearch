@@ -45,7 +45,7 @@ from sqlalchemy.orm import Session
 
 from app.models.product import Product
 from app.services.fuzzy_search import fuzzy_search_products
-from app.services.query_parser import ParsedQuery, parse_query
+from app.services.query_parser import ParsedQuery, parse_query, STOP_WORDS
 from app.services.semantic_search import semantic_search_products
 from app.services.search_config import (
     SEMANTIC_WEIGHT, FUZZY_WEIGHT, EXACT_WEIGHT, PARTIAL_WEIGHT,
@@ -191,12 +191,7 @@ def _calculate_exact_score(query: str, product: Product) -> float:
     brand = (product.brand or "").strip().lower()
     category = (product.category or "").strip().lower()
 
-    tags = []
-    if product.tags:
-        if isinstance(product.tags, list):
-            tags = [t.strip().lower() for t in product.tags]
-        else:
-            tags = [t.strip().lower() for t in str(product.tags).split(",") if t.strip()]
+    tags = [t.strip().lower() for t in product.tags.split(",") if t.strip()] if product.tags else []
 
     if q_clean == name:
         return 1.0
@@ -224,7 +219,9 @@ def _calculate_partial_score(query: str, product: Product) -> float:
     if not q_clean:
         return 0.0
 
-    q_tokens = [t for t in q_clean.split() if t]
+    q_tokens = [t for t in q_clean.split() if t and t not in STOP_WORDS and len(t) >= 2]
+    if not q_tokens:
+        q_tokens = [t for t in q_clean.split() if t]
     if not q_tokens:
         return 0.0
 
@@ -232,12 +229,7 @@ def _calculate_partial_score(query: str, product: Product) -> float:
     brand_words = [t for t in (product.brand or "").lower().split() if t]
     cat_words = [t for t in (product.category or "").lower().split() if t]
 
-    tag_words = []
-    if product.tags:
-        if isinstance(product.tags, list):
-            tag_words = [t.strip().lower() for t in product.tags]
-        else:
-            tag_words = [t.strip().lower() for t in str(product.tags).split(",") if t.strip()]
+    tag_words = [t.strip().lower() for t in product.tags.split(",") if t.strip()] if product.tags else []
 
     def _token_field_score(target_words: List[str]) -> float:
         if not target_words:
@@ -419,7 +411,7 @@ def search_products(
         limit=candidate_limit,
         min_price=eff_min_price,
         max_price=eff_max_price,
-        min_similarity=0.0,
+        min_similarity=0.38,
         normalized_queries=parsed.normalized_query_variants,
     )
 
@@ -579,7 +571,7 @@ def search_products(
 
         # Generic False-Positive Protection
         has_strong_signal = (
-            (e_score > 0) or (p_score > 0) or
+            (e_score > 0) or (p_score >= 0.25) or
             (f_score_raw >= STRONG_SIGNAL_FUZZY_MIN) or
             (s_score_raw >= STRONG_SIGNAL_SEMANTIC_MIN) or
             brand_match

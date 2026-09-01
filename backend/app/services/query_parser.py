@@ -27,10 +27,11 @@ from sqlalchemy import distinct, select
 from sqlalchemy.orm import Session
 
 from app.models.product import Product
+from app.services.number_parser import parse_numeric_expression
 from app.services.search_config import (
     W_SIM, W_FREQ, W_FIELD_PRIORITY,
     FIELD_PRIORITY_BONUS,
-    MIN_CONFIDENCE_SHORT, MIN_CONFIDENCE_LONG,
+    MIN_CONFIDENCE_SHORT, MIN_CONFIDENCE_LONG, MIN_CONFIDENCE_PHONETIC,
     MULTI_CANDIDATE_MARGIN,
     MAX_EDIT_DISTANCE_SHORT, MAX_EDIT_DISTANCE_LONG, MAX_EDIT_DISTANCE_PHONETIC,
     CATEGORY_MATCH_CONFIDENCE_MIN,
@@ -71,6 +72,7 @@ SOFT_PREFERENCE_TERMS: Set[str] = {
 PRICE_OPERATOR_WORDS: Set[str] = {
     "under", "below", "above", "over", "between", "less", "more", "than",
     "max", "maximum", "min", "minimum", "up", "least", "most",
+    "rupee", "rupees", "rs", "inr", "usd", "dollar", "dollars", "buck", "bucks", "euro", "euros", "cent", "cents",
 }
 
 
@@ -256,6 +258,8 @@ class CatalogVocabulary:
         tag_freq: Counter = Counter()
         product_token_cats = defaultdict(Counter)
 
+        self.description_tokens: Set[str] = set()
+
         products_data = db.execute(
             select(Product.product_name, Product.brand, Product.category, Product.tags, Product.description)
         ).fetchall()
@@ -281,13 +285,26 @@ class CatalogVocabulary:
                     tag_freq[token] += 1
                     if category and len(token) >= 3 and token not in STOP_WORDS:
                         product_token_cats[token][category] += 1
+            if description:
+                for token in self._tokenize_field(str(description)):
+                    if len(token) >= 3 and token not in STOP_WORDS:
+                        self.description_tokens.add(token)
 
-        # Dynamic product-type to category mapping (e.g. 'mouse' -> 'Electronics')
+        # Dynamic product-type to category mapping (e.g. 'mouse' -> 'Electronics', 'laptop' -> 'Computers & Accessories')
+        # Strict guard: exclude brands, category names, stopwords, soft preferences, price words, and require >= 5 counts with >= 70% dominance
         self.product_type_to_category = {}
         for token, cat_counter in product_token_cats.items():
+            if (
+                token in self.brand_lower_map or
+                token in self.category_lower_map or
+                token in STOP_WORDS or
+                token in SOFT_PREFERENCE_TERMS or
+                token in PRICE_OPERATOR_WORDS
+            ):
+                continue
             top_cat, top_count = cat_counter.most_common(1)[0]
             total_count = sum(cat_counter.values())
-            if (top_count / float(total_count) >= 0.50) and top_count >= 2:
+            if (top_count / float(total_count) >= 0.70) and top_count >= 5:
                 self.product_type_to_category[token] = top_cat
 
         # Build vocab entries per field
@@ -295,6 +312,9 @@ class CatalogVocabulary:
         self.category_vocab = self._build_vocab_entries(category_freq, self.categories, "category")
         self.product_name_vocab = self._build_pname_vocab(product_name_freq)
         self.tag_vocab = self._build_tag_vocab(tag_freq)
+        self.description_vocab = [
+            _FieldVocabEntry(t, t, "description", 1) for t in self.description_tokens
+        ]
 
         # Global max frequency for normalization
         all_freqs = list(brand_freq.values()) + list(category_freq.values()) + \
@@ -322,6 +342,8 @@ class CatalogVocabulary:
         for entry in self.tag_vocab:
             if entry.token == lower:
                 return True
+        if lower in self.description_tokens:
+            return True
         return False
 
     @staticmethod
@@ -451,6 +473,7 @@ class CatalogVocabulary:
             (self.category_vocab, "category"),
             (self.product_name_vocab, "product_name"),
             (self.tag_vocab, "tag"),
+            (self.description_vocab, "description"),
         ]:
             for entry in field_vocab:
                 if len(entry.token) < 3 and tok_len >= 3:
@@ -458,15 +481,8 @@ class CatalogVocabulary:
 
                 # Compute edit distance on raw, repeat-collapsed, and stripped tokens
                 dist_raw = distance.DamerauLevenshtein.distance(lower_tok, entry.token)
-                dist_col = distance.DamerauLevenshtein.distance(col_tok, entry.token)
+                dist_col_raw = distance.DamerauLevenshtein.distance(col_tok, entry.token)
                 dist_strip = distance.DamerauLevenshtein.distance(stripped_tok, entry.token) if stripped_tok else 999
-                dist = min(dist_raw, dist_col, dist_strip)
-
-                # Determine max distance based on token length
-                max_dist = MAX_EDIT_DISTANCE_SHORT if tok_len <= 4 else MAX_EDIT_DISTANCE_LONG
-                # For longer tokens (>= 7 chars), allow distance 3 if stripped prefix or partial match is strong
-                if tok_len >= 7 and (dist_strip <= 2 or fuzz.partial_ratio(lower_tok, entry.token) >= 85):
-                    max_dist = 3
 
                 # Phonetic match check
                 phonetic_match = (
@@ -474,6 +490,16 @@ class CatalogVocabulary:
                     entry.soundex == col_soundex or
                     (stripped_soundex is not None and entry.soundex == stripped_soundex)
                 ) and len(lower_tok) >= 3
+
+                # Allow dist_col_raw for phonetic matches where repeat characters are phonetically equivalent
+                dist_col = dist_col_raw if (phonetic_match or entry.token == col_tok) else (dist_col_raw + (len(lower_tok) - len(col_tok)))
+                dist = min(dist_raw, dist_col, dist_strip)
+
+                # Determine max distance based on token length
+                max_dist = MAX_EDIT_DISTANCE_SHORT if tok_len <= 4 else MAX_EDIT_DISTANCE_LONG
+                # For longer tokens (>= 7 chars), allow distance 3 if stripped prefix was detected
+                if tok_len >= 7 and dist_strip <= 2:
+                    max_dist = 3
 
                 if dist <= max_dist or (phonetic_match and dist <= MAX_EDIT_DISTANCE_PHONETIC):
                     ratio_raw = fuzz.ratio(lower_tok, entry.token) / 100.0
@@ -501,7 +527,7 @@ class CatalogVocabulary:
                     )
 
                     if phonetic_match:
-                        confidence += 0.05
+                        confidence += 0.10
 
                     candidates.append(TokenCorrection(
                         original=token,
@@ -519,7 +545,9 @@ class CatalogVocabulary:
         candidates.sort(key=lambda c: c.confidence, reverse=True)
 
         # Length-gated threshold check (§3.4)
-        min_conf = MIN_CONFIDENCE_SHORT if tok_len <= 4 else MIN_CONFIDENCE_LONG
+        min_conf = (0.80 if tok_len <= 3 else MIN_CONFIDENCE_SHORT) if tok_len <= 4 else MIN_CONFIDENCE_LONG
+        if candidates[0].phonetic_match:
+            min_conf = min(min_conf, MIN_CONFIDENCE_PHONETIC)
         if candidates[0].confidence < min_conf:
             return [TokenCorrection(original=token, corrected=token, confidence=0.0, source_field="uncorrected", similarity=0.0)]
 
@@ -538,11 +566,13 @@ class CatalogVocabulary:
         return result
 
     def _check_exact_match(self, lower_token: str) -> Optional[Tuple[str, str]]:
-        """Check for exact match in brand or category maps."""
+        """Check for exact match in brand or category maps, or description."""
         if lower_token in self.brand_lower_map:
             return (self.brand_lower_map[lower_token], "brand")
         if lower_token in self.category_lower_map:
             return (self.category_lower_map[lower_token], "category")
+        if lower_token in self.description_tokens:
+            return (lower_token, "description")
         return None
 
     # ==================================================================
@@ -605,7 +635,7 @@ class CatalogVocabulary:
 
         return None
 
-    def find_matching_category(self, token_or_phrase: str, min_confidence: float = 80.0) -> Optional[Tuple[str, float]]:
+    def find_matching_category(self, token_or_phrase: str, min_confidence: float = 90.0) -> Optional[Tuple[str, float]]:
         """Match a token or phrase against catalog categories and dynamic product-type mappings.
 
         Returns (canonical_category_name, confidence_score) or None.
@@ -614,115 +644,175 @@ class CatalogVocabulary:
             return None
 
         q = token_or_phrase.strip().lower()
-        if not q or len(q) < 3 or q in STOP_WORDS:
+        if not q or len(q) < 3 or q in STOP_WORDS or q in PRICE_OPERATOR_WORDS:
             return None
 
         # 1. Exact match on full category name
         if q in self.category_lower_map:
             return self.category_lower_map[q], 100.0
 
-        # 2. Token-level match against multi-word categories
+        # 2. Token-level match against multi-word categories (e.g. "fitness" in "Sports & Fitness")
         for lower_cat, canonical in self.category_lower_map.items():
-            cat_tokens = [t.lower() for t in re.split(r'[\s&,/\-]+', lower_cat) if len(t) >= 3]
+            cat_tokens = [t.lower() for t in re.split(r'[\s&,/\-]+', lower_cat) if len(t) >= 4 and t.lower() not in STOP_WORDS]
             if q in cat_tokens:
                 return canonical, 95.0
 
-        # 3. Dynamic Product-Type to Category Mapping (e.g. 'mouse' -> 'Electronics')
+        # 3. Dynamic Product-Type to Category Mapping (e.g. 'mouse' -> 'Electronics', 'laptop' -> 'Computers & Accessories')
         if q in self.product_type_to_category:
             return self.product_type_to_category[q], 90.0
 
         # 4. High-confidence fuzzy match (e.g. "eletronics" -> "Electronics")
-        best_cat = None
-        best_score = 0.0
-        for lower_cat, canonical in self.category_lower_map.items():
-            ratio = float(fuzz.ratio(q, lower_cat))
-            if ratio >= CATEGORY_MATCH_CONFIDENCE_MIN and ratio > best_score:
-                best_score = ratio
-                best_cat = canonical
+        # Guard: only allow fuzzy match on words >= 6 chars with high similarity (>= 88.0)
+        if len(q) >= 6:
+            best_cat = None
+            best_score = 0.0
+            for lower_cat, canonical in self.category_lower_map.items():
+                ratio = float(fuzz.ratio(q, lower_cat))
+                if ratio >= max(CATEGORY_MATCH_CONFIDENCE_MIN, 88.0) and ratio > best_score:
+                    best_score = ratio
+                    best_cat = canonical
 
-        if best_cat and best_score >= min_confidence:
-            return best_cat, best_score
+            if best_cat and best_score >= min_confidence:
+                return best_cat, best_score
 
         return None
 
 
 # ============================================================================
-# §4 — Price Parser
+# §4 — Price Parser (Generic Numeric Scale & Operator Processing)
 # ============================================================================
 
-def _normalize_amount(raw: str) -> float:
-    """Normalize a price amount string to a float, handling k/K and 'thousand'."""
-    raw = raw.strip().lower().replace(",", "")
-    raw = re.sub(r'^[₹$]|^rs\.?\s*|^inr\s*|^usd\s*', '', raw, flags=re.IGNORECASE).strip()
-    raw = re.sub(r'[₹$]|rs\.?|inr|usd', '', raw, flags=re.IGNORECASE).strip()
-    if raw.endswith("k"):
-        return float(raw[:-1]) * 1_000
-    if "thousand" in raw:
-        numeric_part = re.match(r'[\d.]+', raw)
-        if numeric_part:
-            return float(numeric_part.group()) * 1_000
-    return float(raw)
+_CURRENCY = r"(?:₹|rs\.?\s*|rupees?\s*|inr\s*|\$|usd\s*|dollars?\s*|bucks?\s*|euros?\s*|€|£|gbp\s*|cents?\s*)"
+_OPT_CURRENCY = rf"(?:{_CURRENCY})?"
+_SCALE_WORDS = r"(?:thousand|thousands|million|millions|billion|billions|trillion|trillions|lakh|lakhs|lac|lacs|crore|crores|cr|thosand|thousnd|millon|milon|lkah|laakh|croer|cror|k|m|b|t)"
+_NUM_CHUNK = rf"(?:[\d]+(?:[,.][\d]+)*(?:\s*{_SCALE_WORDS})?)"
+_NUMBER_EXPR = rf"(?:{_OPT_CURRENCY}\s*{_NUM_CHUNK}(?:\s+{_NUM_CHUNK})*(?:\s*{_CURRENCY})?)"
 
+# Model-number suffixes and time units that look like price operators but aren't
+# e.g. "iPhone 12 Max", "Galaxy S24 Ultra", "30 min workout"
+_MODEL_SUFFIX_RE = re.compile(
+    r"\b(\d+)\s*(max|min|pro|plus|ultra|mini|air|se|gt|xl|s|x|hr|hrs|sec|secs|hour|hours|minute|minutes)\b",
+    re.IGNORECASE,
+)
 
-_CURRENCY = r"(?:₹|rs\.?\s*|inr\s*|\$|usd\s*)?"
-_NUMBER = r"[\d]+(?:[,.][\d]+)*\s*(?:k|K|thousand)?"
-
-_UPPER_OPERATOR_WORDS = {"under", "unders", "undr", "below", "belw", "blo", "less", "les", "upto", "max", "maximum", "within", "sub", "cheaper"}
-_LOWER_OPERATOR_WORDS = {"above", "abov", "abovee", "over", "ovr", "more", "min", "minimum", "higher", "starting", "from", "least"}
+# Words that are ambiguous — they're both price operators AND common product/time suffixes
+_AMBIGUOUS_OPERATORS = {"max", "maximum", "min", "minimum", "budget"}
 
 _PRICE_PATTERNS = [
     # 1. Range
     (
         re.compile(
-            rf"\b(?:between|btwn|from|range\s+of)?\s*{_CURRENCY}\s*({_NUMBER})\s*(?:and|to|\-)\s*{_CURRENCY}\s*({_NUMBER})\b",
+            rf"\b(?:between|btwn|from|range\s+of)?\s*({_NUMBER_EXPR})\s*(?:and|to|\-)\s*({_NUMBER_EXPR})\b",
             re.IGNORECASE,
         ),
         "range",
+        False,  # is_suffix_pattern
     ),
     # 2. Upper bound (prefix)
     (
         re.compile(
-            rf"\b(?:under|unders|undr|below|belw|blo|less\s+than|les\s+than|lessthan|up\s+to|upto|max|maximum|at\s+most|atmost|within|sub|cheaper\s+than|budget\s+of|<=?)\s*{_CURRENCY}\s*({_NUMBER})\b",
+            rf"\b(?:under|unders|undr|below|belw|blo|less\s+than|les\s+than|lessthan|up\s+to|upto|max|maximum|at\s+most|atmost|within|sub|cheaper\s+than|budget\s+of|<=?)\s*({_NUMBER_EXPR})\b",
             re.IGNORECASE,
         ),
         "max",
+        False,  # is_suffix_pattern — BUT has ambiguous prefix operators, handled below
     ),
     # 3. Upper bound (suffix)
     (
         re.compile(
-            rf"\b{_CURRENCY}\s*({_NUMBER})\s*(?:or\s+less|or\s+below|max|maximum|budget|and\s+under)\b",
+            rf"\b({_NUMBER_EXPR})\s*(?:or\s+less|or\s+below|max|maximum|budget|and\s+under)\b",
             re.IGNORECASE,
         ),
         "max",
+        True,   # is_suffix_pattern — vulnerable to "12 Max" product names
     ),
     # 4. Lower bound (prefix)
     (
         re.compile(
-            rf"\b(?:above|abov|abovee|over|ovr|more\s+than|morethan|min|minimum|at\s+least|atleast|higher\s+than|starting\s+from|from|>=?)\s*{_CURRENCY}\s*({_NUMBER})\b",
+            rf"\b(?:above|abov|abovee|over|ovr|more\s+than|morethan|min|minimum|at\s+least|atleast|higher\s+than|starting\s+from|from|>=?)\s*({_NUMBER_EXPR})\b",
             re.IGNORECASE,
         ),
         "min",
+        False,  # is_suffix_pattern — BUT has ambiguous prefix operators, handled below
     ),
     # 5. Lower bound (suffix)
     (
         re.compile(
-            rf"\b{_CURRENCY}\s*({_NUMBER})\s*(?:\+|and\s+above|and\s+over|or\s+more|min|minimum)\b",
+            rf"\b({_NUMBER_EXPR})\s*(?:\+|and\s+above|and\s+over|or\s+more|min|minimum)\b",
             re.IGNORECASE,
         ),
         "min",
+        True,   # is_suffix_pattern — vulnerable to "30 min workout"
     ),
 ]
 
 
+def _is_model_suffix_context(match_text: str) -> bool:
+    """Check if matched price span looks like a model-number suffix or time unit.
+    
+    Returns True if the match should be REJECTED as a price constraint.
+    Examples that return True: "12 Max", "30 min", "24 Pro", "5 hr"
+    Examples that return False: "5000 max", "₹12k max", "30k min"
+    """
+    # If the number portion has a currency symbol or scale word, it's a price
+    if re.search(r"[₹$€£]|rs\.?|rupees?|inr|usd|dollars?|bucks?|euros?|thousand|lakh|crore|million|billion|trillion", match_text, re.IGNORECASE):
+        return False
+    # If the number uses k/m/b/t abbreviation (e.g. "5k max"), it's a price
+    if re.search(r"\d[kKmMbBtT]\s", match_text) or re.search(r"\d[kKmMbBtT]$", match_text):
+        return False
+    # If it matches the model suffix pattern (digit directly followed by model word), reject
+    if _MODEL_SUFFIX_RE.search(match_text):
+        return True
+    return False
+
+
+def _is_ambiguous_prefix_price(text: str, match) -> bool:
+    """Check if a prefix-operator match using an ambiguous word (max/min) is actually
+    part of a product name context.
+    
+    Returns True if the match should be REJECTED as a price constraint.
+    Example: "Nike Air Max" has no number, so this won't fire.
+    Example: prefix "max 5000" standalone → accepted as price.
+    Example: prefix "max" in "Soundbar Max" → no number captured, won't match.
+    """
+    matched_text = match.group(0)
+    # Extract the operator word from the start of the match
+    op_word = matched_text.split()[0].lower().strip("<=>,;:!?")
+    if op_word not in _AMBIGUOUS_OPERATORS:
+        return False
+    # Check if the word before the operator is a digit (e.g. "12 max 500" — ambiguous)
+    start = match.start()
+    prefix_text = text[:start].rstrip()
+    if prefix_text and prefix_text[-1].isdigit():
+        return True
+    return False
+
+
 def _extract_price_constraint(text: str) -> Tuple[Optional[PriceConstraint], str]:
-    """Extract price constraint from query text using regex patterns and fuzzy operator matching."""
-    for pattern, kind in _PRICE_PATTERNS:
+    """Extract price constraint from query text using generic numeric parsing, regex patterns, and fuzzy operator matching.
+    
+    Guards against false positives from model-number suffixes (e.g. 'iPhone 12 Max')
+    and time units (e.g. '30 min workout').
+    """
+    for pattern, kind, is_suffix in _PRICE_PATTERNS:
         match = pattern.search(text)
         if match:
             try:
+                matched_text = match.group(0)
+
+                # Guard: suffix patterns — reject if it looks like a model suffix/time unit
+                if is_suffix and _is_model_suffix_context(matched_text):
+                    continue
+
+                # Guard: prefix patterns with ambiguous operators (max/min)
+                if not is_suffix and _is_ambiguous_prefix_price(text, match):
+                    continue
+
                 if kind == "range":
-                    p1 = _normalize_amount(match.group(1))
-                    p2 = _normalize_amount(match.group(2))
+                    p1 = parse_numeric_expression(match.group(1))
+                    p2 = parse_numeric_expression(match.group(2))
+                    if p1 is None or p2 is None:
+                        continue
                     if p1 > p2 and PRICE_SWAP_ON_INVALID_RANGE:
                         p1, p2 = p2, p1
                     constraint = PriceConstraint(
@@ -730,13 +820,17 @@ def _extract_price_constraint(text: str) -> Tuple[Optional[PriceConstraint], str
                         raw_span=(match.start(), match.end()),
                     )
                 elif kind == "max":
-                    val = _normalize_amount(match.group(1))
+                    val = parse_numeric_expression(match.group(1))
+                    if val is None:
+                        continue
                     constraint = PriceConstraint(
                         max_price=val,
                         raw_span=(match.start(), match.end()),
                     )
                 elif kind == "min":
-                    val = _normalize_amount(match.group(1))
+                    val = parse_numeric_expression(match.group(1))
+                    if val is None:
+                        continue
                     constraint = PriceConstraint(
                         min_price=val,
                         raw_span=(match.start(), match.end()),
@@ -753,47 +847,46 @@ def _extract_price_constraint(text: str) -> Tuple[Optional[PriceConstraint], str
                 continue
 
     # Dynamic Fuzzy Price Operator Scanner
+    _UPPER_OPERATOR_WORDS = {"under", "unders", "undr", "below", "belw", "blo", "less", "les", "upto", "max", "maximum", "within", "sub", "cheaper"}
+    _LOWER_OPERATOR_WORDS = {"above", "abov", "abovee", "over", "ovr", "more", "min", "minimum", "higher", "starting", "from", "least"}
+
     words = text.split()
     for i, word in enumerate(words):
-        num_clean = re.sub(r'^[₹$]|^rs\.?\s*|^inr\s*|^usd\s*', '', word, flags=re.IGNORECASE)
-        num_clean = re.sub(r'[₹$]|rs\.?|inr|usd', '', num_clean, flags=re.IGNORECASE)
-        is_num = bool(re.match(r'^\d+(?:\.\d+)?(?:k|K|thousand)?$', num_clean))
+        prev_word = word.lower().strip(".,;:!?")
+        is_upper = any(
+            distance.Levenshtein.distance(prev_word, op) <= 1 or fuzz.ratio(prev_word, op) >= 75
+            for op in _UPPER_OPERATOR_WORDS
+        )
+        is_lower = any(
+            distance.Levenshtein.distance(prev_word, op) <= 1 or fuzz.ratio(prev_word, op) >= 75
+            for op in _LOWER_OPERATOR_WORDS
+        )
 
-        if is_num and i > 0:
-            prev_word = words[i - 1].lower().strip(".,;:!?")
-            is_upper = any(
-                distance.Levenshtein.distance(prev_word, op) <= 1 or fuzz.ratio(prev_word, op) >= 75
-                for op in _UPPER_OPERATOR_WORDS
-            )
-            if is_upper:
-                try:
-                    val = _normalize_amount(num_clean)
-                    pattern = re.compile(rf"\b{re.escape(words[i-1])}\s+{re.escape(word)}\b", re.IGNORECASE)
+        if (is_upper or is_lower) and i + 1 < len(words):
+            # Guard: if the operator word is ambiguous AND preceded by a digit, skip
+            if prev_word in _AMBIGUOUS_OPERATORS and i > 0 and words[i - 1].rstrip(".,;:!?").isdigit():
+                continue
+
+            # Try to match maximal numeric expression after operator (from 4 tokens down to 1)
+            for k in range(min(4, len(words) - i - 1), 0, -1):
+                candidate_text = " ".join(words[i + 1 : i + 1 + k])
+                val = parse_numeric_expression(candidate_text)
+                if val is not None:
+                    # Guard: if the combined span looks like a model suffix, skip
+                    combined = f"{words[i]} {candidate_text}"
+                    if _is_model_suffix_context(combined):
+                        continue
+
+                    pattern = re.compile(rf"\b{re.escape(words[i])}\s+{re.escape(candidate_text)}\b", re.IGNORECASE)
                     m = pattern.search(text)
                     span = (m.start(), m.end()) if m else (0, 0)
-                    remaining = text[:span[0]] + " " + text[span[1]:] if m else " ".join(words[:i-1] + words[i+1:])
+                    remaining = text[:span[0]] + " " + text[span[1]:] if m else " ".join(words[:i] + words[i + 1 + k:])
                     remaining = _strip_dangling_operators(remaining)
                     remaining = re.sub(r"\s+", " ", remaining).strip()
-                    return PriceConstraint(max_price=val, raw_span=span), remaining
-                except Exception:
-                    pass
-
-            is_lower = any(
-                distance.Levenshtein.distance(prev_word, op) <= 1 or fuzz.ratio(prev_word, op) >= 75
-                for op in _LOWER_OPERATOR_WORDS
-            )
-            if is_lower:
-                try:
-                    val = _normalize_amount(num_clean)
-                    pattern = re.compile(rf"\b{re.escape(words[i-1])}\s+{re.escape(word)}\b", re.IGNORECASE)
-                    m = pattern.search(text)
-                    span = (m.start(), m.end()) if m else (0, 0)
-                    remaining = text[:span[0]] + " " + text[span[1]:] if m else " ".join(words[:i-1] + words[i+1:])
-                    remaining = _strip_dangling_operators(remaining)
-                    remaining = re.sub(r"\s+", " ", remaining).strip()
-                    return PriceConstraint(min_price=val, raw_span=span), remaining
-                except Exception:
-                    pass
+                    if is_upper:
+                        return PriceConstraint(max_price=val, raw_span=span), remaining
+                    else:
+                        return PriceConstraint(min_price=val, raw_span=span), remaining
 
     return None, text
 
@@ -860,9 +953,12 @@ def parse_query(db: Session, raw_query: str) -> ParsedQuery:
         corrections = vocab.correct_token(tok)
         corrected_tokens.extend(corrections)
         top = corrections[0]
-        if top.source_field != "uncorrected" and top.confidence >= 0.70:
+        # Use lower acceptance bar for phonetic matches
+        accept_conf = MIN_CONFIDENCE_PHONETIC if top.phonetic_match else 0.70
+        correction_conf = MIN_CONFIDENCE_PHONETIC if top.phonetic_match else 0.75
+        if top.source_field != "uncorrected" and top.confidence >= accept_conf:
             normalized_parts.append(top.corrected)
-            if top.corrected.lower() != tok.lower() and top.confidence >= 0.75:
+            if top.corrected.lower() != tok.lower() and top.confidence >= correction_conf:
                 has_real_correction = True
         else:
             normalized_parts.append(tok)
@@ -890,6 +986,7 @@ def parse_query(db: Session, raw_query: str) -> ParsedQuery:
     has_exact_brand_match = False
 
     # 3A. First inspect high-confidence token corrections
+    has_high_conf_category = False
     for tc in corrected_tokens:
         if tc.source_field == "brand" and tc.confidence >= 0.75:
             if tc.corrected not in detected_brands:
@@ -899,11 +996,13 @@ def parse_query(db: Session, raw_query: str) -> ParsedQuery:
             if tc.confidence == 1.0 or tc.original.lower() == tc.corrected.lower():
                 has_exact_brand_match = True
 
-        if tc.source_field == "category" and tc.confidence >= 0.75:
+        if tc.source_field == "category" and tc.confidence >= 0.85:
             if tc.corrected not in detected_categories:
                 detected_categories.append(tc.corrected)
                 if detected_category_anchor is None:
                     detected_category_anchor = tc.corrected
+            if tc.confidence >= 0.90:
+                has_high_conf_category = True
 
     # 3B. Multi-word sliding window check over NORMALIZED tokens
     norm_tokens = [t for t in re.split(r'[\s,\-/]+', normalized_query) if t]
@@ -923,13 +1022,15 @@ def parse_query(db: Session, raw_query: str) -> ParsedQuery:
                     has_exact_brand_match = True
 
             # Category matching
-            cat_res = vocab.find_matching_category(window, min_confidence=80.0)
+            cat_res = vocab.find_matching_category(window, min_confidence=90.0)
             if cat_res:
                 cname, cconf = cat_res
                 if cname not in detected_categories:
                     detected_categories.append(cname)
                     if detected_category_anchor is None:
                         detected_category_anchor = cname
+                if cconf >= 90.0:
+                    has_high_conf_category = True
 
     # -------------------------------------------------------------------
     # Step 4: Comparison & Hard-Filter Safety
@@ -942,9 +1043,9 @@ def parse_query(db: Session, raw_query: str) -> ParsedQuery:
         detected_brands and not is_comparative and (has_exact_brand_match or is_single_word)
     )
     is_category_hard_filter = bool(
-        detected_category_anchor and not is_comparative and is_single_word
+        detected_category_anchor and not is_comparative and is_single_word and has_high_conf_category
     )
-    is_explicit_product_query = bool(detected_category_anchor)
+    is_explicit_product_query = bool(detected_category_anchor and has_high_conf_category)
 
     # -------------------------------------------------------------------
     # Step 5: Soft Preferences

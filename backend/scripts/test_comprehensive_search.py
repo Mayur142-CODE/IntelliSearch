@@ -35,6 +35,7 @@ if str(BACKEND_DIR) not in sys.path:
 from app.core.database import SessionLocal
 from app.services.search_ranking import search_products
 from app.services.query_parser import parse_query, CatalogVocabulary
+from app.services.autocomplete import generate_suggestions
 
 
 # ============================================================================
@@ -673,6 +674,231 @@ def test_regression_H_hp_laptop(db, result):
 
 
 # ============================================================================
+# 11. GENERIC NUMERIC SCALES & PUSH-DOWN VALIDATION (14 tests)
+# ============================================================================
+
+def test_scale_wireless_headphones_under_2_lakh(db, result):
+    """'wireless headphones under 2 lakh' — semantic_query='wireless headphones', max_price=200000."""
+    results, parsed = search_products(db, "wireless headphones under 2 lakh", limit=10)
+    assert parsed.max_price == 200000.0, f"Expected max_price=200000.0, got {parsed.max_price}"
+    assert "wireless" in parsed.semantic_query.lower() or "headphone" in parsed.semantic_query.lower()
+    for r in results:
+        assert float(r.product.price) <= 200000.0, f"Product {r.product.id} price {r.product.price} > 200000"
+    result.message = f"Parsed max_price=200000, all {len(results)} results <= Rs 2,00,000"
+
+def test_scale_gaming_laptop_under_1_5_lakh(db, result):
+    """'gaming laptop under 1.5 lakh' — semantic_query='gaming laptop', max_price=150000."""
+    results, parsed = search_products(db, "gaming laptop under 1.5 lakh", limit=10)
+    assert parsed.max_price == 150000.0, f"Expected max_price=150000.0, got {parsed.max_price}"
+    for r in results:
+        assert float(r.product.price) <= 150000.0, f"Product {r.product.id} price {r.product.price} > 150000"
+    result.message = f"Parsed max_price=150000, all {len(results)} results <= Rs 1,50,000"
+
+def test_scale_iphone_under_1_million(db, result):
+    """'iphone under 1 million' — semantic_query='iphone', max_price=1000000."""
+    results, parsed = search_products(db, "iphone under 1 million", limit=10)
+    assert parsed.max_price == 1000000.0, f"Expected max_price=1000000.0, got {parsed.max_price}"
+    for r in results:
+        assert float(r.product.price) <= 1000000.0, f"Product {r.product.id} price {r.product.price} > 1000000"
+    result.message = f"Parsed max_price=1000000, all {len(results)} results <= Rs 10,00,000"
+
+def test_scale_logitech_mouse_between_5k_and_20k(db, result):
+    """'logitech mouse between 5k and 20k' — min_price=5000, max_price=20000."""
+    results, parsed = search_products(db, "logitech mouse between 5k and 20k", limit=10)
+    assert parsed.min_price == 5000.0, f"Expected min_price=5000.0, got {parsed.min_price}"
+    assert parsed.max_price == 20000.0, f"Expected max_price=20000.0, got {parsed.max_price}"
+    for r in results:
+        p = float(r.product.price)
+        assert 5000.0 <= p <= 20000.0, f"Product {r.product.id} price {p} not in [5000, 20000]"
+    result.message = f"Range [5000, 20000] verified for all {len(results)} results"
+
+def test_scale_laptop_between_1_lakh_and_2_lakh(db, result):
+    """'laptop between 1 lakh and 2 lakh' — min_price=100000, max_price=200000."""
+    results, parsed = search_products(db, "laptop between 1 lakh and 2 lakh", limit=10)
+    assert parsed.min_price == 100000.0, f"Expected min_price=100000.0, got {parsed.min_price}"
+    assert parsed.max_price == 200000.0, f"Expected max_price=200000.0, got {parsed.max_price}"
+    for r in results:
+        p = float(r.product.price)
+        assert 100000.0 <= p <= 200000.0, f"Product {r.product.id} price {p} not in [100000, 200000]"
+    result.message = f"Range [100000, 200000] verified for all {len(results)} results"
+
+def test_scale_range_1m_to_2m(db, result):
+    """'between 1M and 2M' — min_price=1000000, max_price=2000000."""
+    parsed = parse_query(db, "between 1M and 2M")
+    assert parsed.min_price == 1000000.0, f"Expected min_price=1000000.0, got {parsed.min_price}"
+    assert parsed.max_price == 2000000.0, f"Expected max_price=2000000.0, got {parsed.max_price}"
+    result.message = "1M to 2M range normalized correctly"
+
+def test_scale_electronics_under_1_crore(db, result):
+    """'electronics under 1 crore' — max_price=10000000."""
+    results, parsed = search_products(db, "electronics under 1 crore", limit=10)
+    assert parsed.max_price == 10000000.0, f"Expected max_price=10000000.0, got {parsed.max_price}"
+    for r in results:
+        assert float(r.product.price) <= 10000000.0, f"Price > 1 crore: {r.product.price}"
+    result.message = f"1 crore max_price=10000000 verified for {len(results)} results"
+
+def test_scale_laptop_under_2_5_billion(db, result):
+    """'laptop under 2.5 billion' — max_price=2500000000."""
+    results, parsed = search_products(db, "laptop under 2.5 billion", limit=10)
+    assert parsed.max_price == 2500000000.0, f"Expected max_price=2500000000.0, got {parsed.max_price}"
+    result.message = "2.5 billion parsed to 2500000000.0"
+
+def test_scale_comma_formatting_indian_and_intl(db, result):
+    """'under 1,00,000' and 'under 1,000,000' commas normalization."""
+    p1 = parse_query(db, "laptop under 1,00,000")
+    assert p1.max_price == 100000.0, f"Expected 100000, got {p1.max_price}"
+    p2 = parse_query(db, "laptop under 1,000,000")
+    assert p2.max_price == 1000000.0, f"Expected 1000000, got {p2.max_price}"
+    result.message = "Indian and International comma formats normalized correctly"
+
+def test_scale_combined_expression(db, result):
+    """'headphones under 1 lakh 50 thousand' — max_price=150000."""
+    results, parsed = search_products(db, "headphones under 1 lakh 50 thousand", limit=10)
+    assert parsed.max_price == 150000.0, f"Expected max_price=150000.0, got {parsed.max_price}"
+    result.message = "Combined expression '1 lakh 50 thousand' parsed to 150000.0"
+
+def test_scale_fuzzy_operator_and_scale(db, result):
+    """'laptop undr 2 lakh' — typo operator + scale word."""
+    results, parsed = search_products(db, "laptop undr 2 lakh", limit=10)
+    assert parsed.max_price == 200000.0, f"Expected max_price=200000.0, got {parsed.max_price}"
+    result.message = "Fuzzy operator 'undr' + '2 lakh' parsed to max_price=200000.0"
+
+def test_no_false_price_iphone_15(db, result):
+    """'iPhone 15' — model number 15 must NOT become max_price or min_price."""
+    parsed = parse_query(db, "iPhone 15")
+    assert parsed.min_price is None, f"False min_price detected: {parsed.min_price}"
+    assert parsed.max_price is None, f"False max_price detected: {parsed.max_price}"
+    result.message = "iPhone 15 correctly has no price constraint"
+
+def test_no_false_price_samsung_galaxy_s24(db, result):
+    """'Samsung Galaxy S24' — model number S24 must NOT become price constraint."""
+    parsed = parse_query(db, "Samsung Galaxy S24")
+    assert parsed.min_price is None, f"False min_price detected: {parsed.min_price}"
+    assert parsed.max_price is None, f"False max_price detected: {parsed.max_price}"
+    result.message = "Samsung Galaxy S24 correctly has no price constraint"
+
+def test_no_false_price_rtx_4060(db, result):
+    """'RTX 4060' — model number 4060 must NOT become price constraint."""
+    parsed = parse_query(db, "RTX 4060")
+    assert parsed.min_price is None, f"False min_price detected: {parsed.min_price}"
+    assert parsed.max_price is None, f"False max_price detected: {parsed.max_price}"
+    result.message = "RTX 4060 correctly has no price constraint"
+
+
+# ============================================================================
+# §12 — Search Pipeline Hardening Tests
+# ============================================================================
+
+def test_hardening_nike_12_max(db, result):
+    """'Nike 12 Max' — product model name must NOT extract max_price=12."""
+    parsed = parse_query(db, "Nike 12 Max")
+    assert parsed.max_price is None, f"False max_price detected: {parsed.max_price}"
+    assert parsed.min_price is None, f"False min_price detected: {parsed.min_price}"
+    assert "nike" in parsed.semantic_query.lower(), f"Expected 'Nike' in semantic query, got {parsed.semantic_query!r}"
+    result.message = "'Nike 12 Max' correctly parsed with no false price constraint"
+
+def test_hardening_iphone_12_max(db, result):
+    """'iPhone 12 Max' — model name must NOT extract max_price=12."""
+    parsed = parse_query(db, "iPhone 12 Max")
+    assert parsed.max_price is None, f"False max_price detected: {parsed.max_price}"
+    assert parsed.min_price is None, f"False min_price detected: {parsed.min_price}"
+    result.message = "'iPhone 12 Max' correctly parsed with no false price constraint"
+
+def test_hardening_30_min_workout_gloves(db, result):
+    """'30 min workout gloves' — time unit 'min' must NOT extract min_price=30."""
+    parsed = parse_query(db, "30 min workout gloves")
+    assert parsed.min_price is None, f"False min_price detected: {parsed.min_price}"
+    assert parsed.max_price is None, f"False max_price detected: {parsed.max_price}"
+    result.message = "'30 min workout gloves' correctly parsed with no false price constraint"
+
+def test_hardening_multi_token_dilution(db, result):
+    """'nike xk92z1abc' — multi-token query with garbled SKU must still rank Nike products high."""
+    results, parsed = search_products(db, "nike xk92z1abc", limit=5)
+    assert len(results) > 0, "Expected results for 'nike xk92z1abc', got 0"
+    top_brand = results[0].product.brand.lower()
+    assert top_brand == "nike", f"Expected top result brand 'Nike', got {top_brand!r}"
+    assert results[0].fuzzy_score >= 0.30 or results[0].final_score >= 0.30, f"Expected strong score, got f={results[0].fuzzy_score}, final={results[0].final_score}"
+    result.message = f"Multi-token 'nike xk92z1abc' returned {len(results)} Nike products with top score {results[0].final_score:.4f}"
+
+def test_hardening_bag_of_chips(db, result):
+    """'bag of chips' — ambiguous word 'bag' must NOT crash or falsely zero out query."""
+    parsed = parse_query(db, "bag of chips")
+    results, _ = search_products(db, "bag of chips", limit=5)
+    result.message = f"'bag of chips' parsed cleanly (semantic='{parsed.semantic_query}') without crash"
+
+def test_hardening_irrelevant_something_to_eat(db, result):
+    """'something to eat or drink' — out-of-catalog query must return 0 results."""
+    results, parsed = search_products(db, "something to eat or drink", limit=5)
+    assert len(results) == 0, f"Expected 0 results for irrelevant query, got {len(results)} (top: {results[0].product.product_name} at {results[0].final_score})"
+    result.message = "'something to eat or drink' returned 0 results as expected"
+
+def test_hardening_nonsense_latency(db, result):
+    """'asdkjhaskjdh' — nonsense query returns 0 results within latency SLA (< 1000ms)."""
+    t0 = time.perf_counter()
+    results, parsed = search_products(db, "asdkjhaskjdh", limit=5)
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    assert len(results) == 0, f"Expected 0 results for nonsense query, got {len(results)}"
+    assert elapsed_ms < 1000.0, f"Latency too high: {elapsed_ms:.1f}ms"
+    result.message = f"Nonsense query returned 0 results in {elapsed_ms:.1f}ms"
+
+def test_hardening_autocomplete_consistency(db, result):
+    """'nykyeyy' — autocomplete top suggestion and search parser must agree on 'Nike'."""
+    suggestions = generate_suggestions(db, "nykyeyy", max_results=3)
+    parsed = parse_query(db, "nykyeyy")
+    assert len(suggestions) > 0, "Expected autocomplete suggestions for 'nykyeyy'"
+    top_text = suggestions[0].text.lower()
+    assert "nike" in top_text or "nike" in parsed.semantic_query.lower(), f"Autocomplete/Search disagreement: ac='{top_text}', search='{parsed.semantic_query}'"
+    result.message = f"Autocomplete suggestion '{suggestions[0].text}' agrees with search correction '{parsed.semantic_query}'"
+
+def test_hardening_under_50_rupee_icecream(db, result):
+    """'under 50 rupee icecream' — max_price=50, semantic='icecream', NO unrelated categories."""
+    parsed = parse_query(db, "under 50 rupee icecream")
+    assert parsed.max_price == 50.0, f"Expected max_price=50.0, got {parsed.max_price}"
+    assert "icecream" in parsed.semantic_query.lower(), f"Expected semantic query 'icecream', got {parsed.semantic_query!r}"
+    assert len(parsed.detected_categories) == 0, f"Unexpected false categories detected: {parsed.detected_categories}"
+    result.message = "'under 50 rupee icecream' parsed to max_price=50 with 0 false categories"
+
+def test_hardening_bare_icecream_no_category(db, result):
+    """'icecream' — out-of-catalog product name must have NO false category."""
+    parsed = parse_query(db, "icecream")
+    assert len(parsed.detected_categories) == 0, f"Unexpected false categories detected: {parsed.detected_categories}"
+    result.message = "'icecream' produced 0 false categories"
+
+def test_hardening_under_5000_laptop(db, result):
+    """'under 5000 laptop' — max_price=5000, category='Computers & Accessories'."""
+    parsed = parse_query(db, "under 5000 laptop")
+    assert parsed.max_price == 5000.0, f"Expected max_price=5000.0, got {parsed.max_price}"
+    assert "Computers & Accessories" in parsed.detected_categories, f"Expected 'Computers & Accessories', got {parsed.detected_categories}"
+    result.message = "'under 5000 laptop' correctly parsed price and category"
+
+def test_hardening_under_5000_wireless_headphones(db, result):
+    """'under 5000 wireless headphones' — max_price=5000, category='Audio'."""
+    parsed = parse_query(db, "under 5000 wireless headphones")
+    assert parsed.max_price == 5000.0, f"Expected max_price=5000.0, got {parsed.max_price}"
+    assert "Audio" in parsed.detected_categories, f"Expected 'Audio', got {parsed.detected_categories}"
+    result.message = "'under 5000 wireless headphones' correctly parsed price and category"
+
+def test_hardening_something_to_eat_or_drink_no_category(db, result):
+    """'something to eat or drink' — conceptual query must NOT have forced false category."""
+    parsed = parse_query(db, "something to eat or drink")
+    assert len(parsed.detected_categories) == 0, f"Unexpected false categories: {parsed.detected_categories}"
+    result.message = "'something to eat or drink' produced 0 false categories"
+
+def test_hardening_gaming_laptop_category(db, result):
+    """'gaming laptop' — product noun 'laptop' correctly maps to Computers/Gaming category."""
+    parsed = parse_query(db, "gaming laptop")
+    assert any(c in parsed.detected_categories for c in ["Computers & Accessories", "Gaming"]), f"Expected laptop category, got {parsed.detected_categories}"
+    result.message = f"'gaming laptop' detected categories: {parsed.detected_categories}"
+
+def test_hardening_laptop_and_headphones_multi_category(db, result):
+    """'laptop and headphones' — returns both categories because both matches are independently strong."""
+    parsed = parse_query(db, "laptop and headphones")
+    assert "Computers & Accessories" in parsed.detected_categories, f"Expected 'Computers & Accessories', got {parsed.detected_categories}"
+    assert "Audio" in parsed.detected_categories, f"Expected 'Audio', got {parsed.detected_categories}"
+    result.message = "'laptop and headphones' independently detected both valid categories"
+
+
+# ============================================================================
 # Main Runner
 # ============================================================================
 
@@ -772,6 +998,47 @@ def run_comprehensive_validation():
     ]:
         suite.run_test(test_fn.__doc__.strip(), test_fn)
 
+    # 11. Generic Scales & Push-Down Validation
+    print("\n>>> 11. GENERIC NUMERIC SCALES & PUSH-DOWN VALIDATION")
+    for test_fn in [
+        test_scale_wireless_headphones_under_2_lakh,
+        test_scale_gaming_laptop_under_1_5_lakh,
+        test_scale_iphone_under_1_million,
+        test_scale_logitech_mouse_between_5k_and_20k,
+        test_scale_laptop_between_1_lakh_and_2_lakh,
+        test_scale_range_1m_to_2m,
+        test_scale_electronics_under_1_crore,
+        test_scale_laptop_under_2_5_billion,
+        test_scale_comma_formatting_indian_and_intl,
+        test_scale_combined_expression,
+        test_scale_fuzzy_operator_and_scale,
+        test_no_false_price_iphone_15,
+        test_no_false_price_samsung_galaxy_s24,
+        test_no_false_price_rtx_4060,
+    ]:
+        suite.run_test(test_fn.__doc__.strip(), test_fn)
+
+    # 12. Pipeline Hardening Tests
+    print("\n>>> 12. PIPELINE HARDENING & AUDIT VERIFICATION")
+    for test_fn in [
+        test_hardening_nike_12_max,
+        test_hardening_iphone_12_max,
+        test_hardening_30_min_workout_gloves,
+        test_hardening_multi_token_dilution,
+        test_hardening_bag_of_chips,
+        test_hardening_irrelevant_something_to_eat,
+        test_hardening_nonsense_latency,
+        test_hardening_autocomplete_consistency,
+        test_hardening_under_50_rupee_icecream,
+        test_hardening_bare_icecream_no_category,
+        test_hardening_under_5000_laptop,
+        test_hardening_under_5000_wireless_headphones,
+        test_hardening_something_to_eat_or_drink_no_category,
+        test_hardening_gaming_laptop_category,
+        test_hardening_laptop_and_headphones_multi_category,
+    ]:
+        suite.run_test(test_fn.__doc__.strip(), test_fn)
+
     all_passed = suite.summary()
     suite.close()
     return all_passed
@@ -779,3 +1046,4 @@ def run_comprehensive_validation():
 
 if __name__ == "__main__":
     run_comprehensive_validation()
+

@@ -80,7 +80,7 @@ def search_products_endpoint(
             "description": p.description,
             "brand": p.brand,
             "category": p.category,
-            "tags": p.tags if isinstance(p.tags, str) else ", ".join(p.tags) if p.tags else None,
+            "tags": p.tags if p.tags else None,
             "price": float(p.price),
             "image": p.image,
             "final_score": round(res.final_score, 4),

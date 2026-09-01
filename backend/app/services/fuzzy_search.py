@@ -96,14 +96,16 @@ def _fuzzy_score_sql(tokens: List[str], query: str, alias: str = "p") -> str:
         return f"({ts} * 0.75 + {full_sim} * 0.25)"
 
     tok_exprs = [_token_score_sql(t, alias) for t in tokens]
+    max_tok = f"GREATEST({', '.join(tok_exprs)})"
     avg_tok = f"(({' + '.join(tok_exprs)}) / {n}.0)"
     coverage_cases = " + ".join(
         f"CASE WHEN ({te}) >= 0.15 THEN 1.0 ELSE 0.0 END" for te in tok_exprs
     )
     coverage = f"(({coverage_cases}) / {n}.0)"
     return (
-        f"({avg_tok} * 0.60"
-        f" + {avg_tok} * {coverage} * 0.25"
+        f"({max_tok} * 0.45"
+        f" + {avg_tok} * 0.25"
+        f" + {avg_tok} * {coverage} * 0.15"
         f" + {full_sim} * 0.15)"
     )
 

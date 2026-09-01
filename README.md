@@ -246,5 +246,17 @@ northstar-product-search/
 
 ---
 
+## ⚠️ Known Limitations & Engineering Trade-offs
+
+1. **Negation and Exclusion Syntax**:
+   - Queries with negation phrases (e.g., `running shoes but not Nike`, `shoes except leather`, `headphones without microphone`) are not currently parsed for term exclusion.
+   - The query parser treats negated tokens (`Nike`, `leather`) as standard query terms, matching rather than excluding them. Full boolean negation and attribute exclusion are planned for a future pipeline revision.
+
+2. **Nonsense / Zero-Match Query Latency**:
+   - For random or unmatchable strings (e.g., `asdkjhaskjdh`), the fast indexed trigram paths (Path 1 and Path 2 in PostgreSQL) return 0 candidates.
+   - The pipeline sequentially executes Path 3 (bounded sequential scan `LIMIT 200`) and a full ChromaDB semantic vector search to ensure no fuzzy/conceptual match was missed, resulting in worst-case query latency (~200–300ms) before correctly returning an empty result set.
+
+---
+
 ## 📄 License
 Distributed under the MIT License. See `LICENSE` for more information.

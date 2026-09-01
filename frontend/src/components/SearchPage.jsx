@@ -221,7 +221,12 @@ export function SearchPage() {
             ))}
             {(interpretation.min_price != null || interpretation.max_price != null) && (
               <span className="rounded bg-emerald-500/10 px-2 py-0.5 font-medium text-emerald-600 dark:text-emerald-400">
-                Price: {interpretation.min_price != null ? `≥ ₹${interpretation.min_price}` : ""} {interpretation.max_price != null ? `≤ ₹${interpretation.max_price}` : ""}
+                Price:{" "}
+                {interpretation.min_price != null && interpretation.max_price != null
+                  ? `₹${Number(interpretation.min_price).toLocaleString("en-IN")} – ₹${Number(interpretation.max_price).toLocaleString("en-IN")}`
+                  : interpretation.min_price != null
+                  ? `≥ ₹${Number(interpretation.min_price).toLocaleString("en-IN")}`
+                  : `≤ ₹${Number(interpretation.max_price).toLocaleString("en-IN")}`}
               </span>
             )}
             {interpretation.soft_preferences?.map((pref) => (

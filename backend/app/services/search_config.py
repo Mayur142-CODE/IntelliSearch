@@ -39,6 +39,7 @@ FIELD_PRIORITY_BONUS = {
 
 MIN_CONFIDENCE_SHORT: float = 0.75   # For tokens 3-4 chars
 MIN_CONFIDENCE_LONG: float = 0.70    # For tokens ≥ 5 chars
+MIN_CONFIDENCE_PHONETIC: float = 0.55  # Lower bar for phonetic-admitted candidates (soundex match is independent evidence)
 
 # ============================================================================
 # §3.5 — Multi-Candidate Margin
@@ -82,11 +83,11 @@ PREFERENCE_BOOST: float = 0.05     # Scaling factor for soft preference score co
 # ============================================================================
 
 MIN_FINAL_SCORE: float = 0.10        # Minimum final score for inclusion (with strong signal)
-MIN_FINAL_SCORE_WEAK: float = 0.15   # Minimum final score when no strong signal present
+MIN_FINAL_SCORE_WEAK: float = 0.18   # Minimum final score when no strong signal present
 
 # Strong signal thresholds (at least one must be met)
 STRONG_SIGNAL_FUZZY_MIN: float = 0.30
-STRONG_SIGNAL_SEMANTIC_MIN: float = 0.40
+STRONG_SIGNAL_SEMANTIC_MIN: float = 0.45
 
 # ============================================================================
 # §5 — Concept Filter Thresholds
