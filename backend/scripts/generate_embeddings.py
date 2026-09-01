@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
 from app.models.product import Product
+from app.services.embedding_sync import build_product_text, calculate_product_hash
 
 
 # ---------------------------------------------------------
@@ -43,40 +44,6 @@ BATCH_SIZE = 256
 CHROMA_DIR = BACKEND_DIR / "data" / "chroma"
 
 COLLECTION_NAME = "products"
-
-
-# ---------------------------------------------------------
-# Product Text
-# ---------------------------------------------------------
-
-def build_product_text(product: Product) -> str:
-    """
-    Build rich searchable text for semantic embedding.
-    """
-
-    parts = []
-
-    if product.product_name:
-        parts.append(product.product_name)
-
-    if product.brand:
-        parts.append(f"Brand: {product.brand}")
-
-    if product.category:
-        parts.append(f"Category: {product.category}")
-
-    if product.tags:
-        if isinstance(product.tags, list):
-            parts.append(
-                f"Tags: {', '.join(str(tag) for tag in product.tags)}"
-            )
-        else:
-            parts.append(f"Tags: {product.tags}")
-
-    if product.description:
-        parts.append(product.description)
-
-    return " | ".join(parts)
 
 
 # ---------------------------------------------------------
@@ -209,7 +176,7 @@ def generate_embeddings():
             # Metadata
             batch_metadata = []
 
-            for product in batch_products:
+            for product, text in zip(batch_products, batch_texts):
 
                 metadata = {
                     "product_id": int(product.id),
@@ -225,6 +192,8 @@ def generate_embeddings():
                     "price": float(
                         product.price or 0
                     ),
+                    "embedding_hash": calculate_product_hash(text),
+                    "embedding_model": MODEL_NAME,
                 }
 
                 batch_metadata.append(metadata)

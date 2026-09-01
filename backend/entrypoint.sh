@@ -6,7 +6,7 @@ echo "Starting NorthStar Product Search Backend Service"
 echo "=================================================="
 
 # 1. Wait for PostgreSQL to be ready and accept connections
-echo "[1/4] Waiting for database connection..."
+echo "[1/5] Waiting for database connection..."
 python - <<'EOF'
 import sys
 import time
@@ -31,12 +31,16 @@ sys.exit(1)
 EOF
 
 # 2. Run Alembic database migrations (creates schema, pg_trgm extension, indexes)
-echo "[2/4] Applying database migrations (alembic upgrade head)..."
+echo "[2/5] Applying database migrations (alembic upgrade head)..."
 alembic upgrade head
 
 # 3. Seed / Import product data (idempotent duplicate prevention)
-echo "[3/4] Checking and importing product dataset..."
+echo "[3/5] Checking and importing product dataset..."
 python scripts/import_products.py
 
-echo "[4/4] Starting FastAPI Uvicorn server on 0.0.0.0:8000 (with --reload)..."
+# 4. Synchronize product embeddings incrementally
+echo "[4/5] Synchronizing product embeddings (incremental)..."
+python scripts/sync_embeddings.py
+
+echo "[5/5] Starting FastAPI Uvicorn server on 0.0.0.0:8000 (with --reload)..."
 exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
